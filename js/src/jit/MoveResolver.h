@@ -1,5 +1,5 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
- * vim: set ts=8 sts=4 et sw=4 tw=99:
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+ * vim: set ts=8 sts=2 et sw=2 tw=80:
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -44,16 +44,19 @@ class MoveOperand {
   int32_t disp_;
 
  public:
-  MoveOperand() {}
-  explicit MoveOperand(Register reg) : kind_(REG), code_(reg.code()) {}
+  MoveOperand() = delete;
+  explicit MoveOperand(Register reg)
+      : kind_(REG), code_(reg.code()), disp_(0) {}
   explicit MoveOperand(FloatRegister reg)
-      : kind_(FLOAT_REG), code_(reg.code()) {}
+      : kind_(FLOAT_REG), code_(reg.code()), disp_(0) {}
   MoveOperand(Register reg, int32_t disp, Kind kind = MEMORY)
       : kind_(kind), code_(reg.code()), disp_(disp) {
     MOZ_ASSERT(isMemoryOrEffectiveAddress());
 
     // With a zero offset, this is a plain reg-to-reg move.
-    if (disp == 0 && kind_ == EFFECTIVE_ADDRESS) kind_ = REG;
+    if (disp == 0 && kind_ == EFFECTIVE_ADDRESS) {
+      kind_ = REG;
+    }
   }
   MoveOperand(MacroAssembler& masm, const ABIArg& arg);
   MoveOperand(const MoveOperand& other)
@@ -130,17 +133,31 @@ class MoveOperand {
       return false;
     }
 
-    if (kind_ != other.kind_) return false;
-    if (kind_ == FLOAT_REG) return floatReg().aliases(other.floatReg());
-    if (code_ != other.code_) return false;
-    if (isMemoryOrEffectiveAddress()) return disp_ == other.disp_;
+    if (kind_ != other.kind_) {
+      return false;
+    }
+    if (kind_ == FLOAT_REG) {
+      return floatReg().aliases(other.floatReg());
+    }
+    if (code_ != other.code_) {
+      return false;
+    }
+    if (isMemoryOrEffectiveAddress()) {
+      return disp_ == other.disp_;
+    }
     return true;
   }
 
   bool operator==(const MoveOperand& other) const {
-    if (kind_ != other.kind_) return false;
-    if (code_ != other.code_) return false;
-    if (isMemoryOrEffectiveAddress()) return disp_ == other.disp_;
+    if (kind_ != other.kind_) {
+      return false;
+    }
+    if (code_ != other.code_) {
+      return false;
+    }
+    if (isMemoryOrEffectiveAddress()) {
+      return disp_ == other.disp_;
+    }
     return true;
   }
   bool operator!=(const MoveOperand& other) const { return !operator==(other); }
@@ -171,7 +188,7 @@ class MoveOp {
   Type endCycleType_;
 
  public:
-  MoveOp() {}
+  MoveOp() = delete;
   MoveOp(const MoveOperand& from, const MoveOperand& to, Type type)
       : from_(from),
         to_(to),
@@ -220,7 +237,8 @@ class MoveResolver {
   struct PendingMove : public MoveOp,
                        public TempObject,
                        public InlineListNode<PendingMove> {
-    PendingMove() {}
+    PendingMove() = delete;
+
     PendingMove(const MoveOperand& from, const MoveOperand& to, Type type)
         : MoveOp(from, to, type) {}
 
@@ -278,6 +296,7 @@ class MoveResolver {
   size_t numMoves() const { return orderedMoves_.length(); }
   const MoveOp& getMove(size_t i) const { return orderedMoves_[i]; }
   uint32_t numCycles() const { return numCycles_; }
+  bool hasNoPendingMoves() const { return pending_.empty(); }
   void setAllocator(TempAllocator& alloc) { movePool_.setAllocator(alloc); }
 };
 

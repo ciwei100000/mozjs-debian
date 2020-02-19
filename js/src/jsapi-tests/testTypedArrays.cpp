@@ -1,5 +1,5 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
- * vim: set ts=8 sts=4 et sw=4 tw=99:
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+ * vim: set ts=8 sts=2 et sw=2 tw=80:
  */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -7,8 +7,10 @@
 
 #include "jsfriendapi.h"
 
+#include "js/ArrayBuffer.h"  // JS::{NewArrayBuffer,IsArrayBufferObject,GetArrayBuffer{ByteLength,Data}}
+#include "js/SharedArrayBuffer.h"  // JS::{NewSharedArrayBuffer,GetSharedArrayBufferData}
 #include "jsapi-tests/tests.h"
-#include "vm/JSCompartment.h"
+#include "vm/Realm.h"
 
 using namespace js;
 
@@ -35,18 +37,18 @@ BEGIN_TEST(testTypedArrays) {
            cx);
 
   size_t nbytes = sizeof(double) * 8;
-  RootedObject buffer(cx, JS_NewArrayBuffer(cx, nbytes));
-  CHECK(JS_IsArrayBufferObject(buffer));
+  RootedObject buffer(cx, JS::NewArrayBuffer(cx, nbytes));
+  CHECK(JS::IsArrayBufferObject(buffer));
 
   RootedObject proto(cx);
   JS_GetPrototype(cx, buffer, &proto);
-  CHECK(!JS_IsArrayBufferObject(proto));
+  CHECK(!JS::IsArrayBufferObject(proto));
 
   {
     JS::AutoCheckCannotGC nogc;
     bool isShared;
-    CHECK_EQUAL(JS_GetArrayBufferByteLength(buffer), nbytes);
-    memset(JS_GetArrayBufferData(buffer, &isShared, nogc), 1, nbytes);
+    CHECK_EQUAL(JS::GetArrayBufferByteLength(buffer), nbytes);
+    memset(JS::GetArrayBufferData(buffer, &isShared, nogc), 1, nbytes);
     CHECK(!isShared);  // Because ArrayBuffer
   }
 
@@ -148,18 +150,19 @@ template <
     bool Shared, Element* GetData(JSObject*, bool*, const JS::AutoRequireNoGC&)>
 bool TestArrayFromBuffer(JSContext* cx) {
   if (Shared &&
-      !cx->compartment()->creationOptions().getSharedMemoryAndAtomicsEnabled())
+      !cx->realm()->creationOptions().getSharedMemoryAndAtomicsEnabled()) {
     return true;
+  }
 
   size_t elts = 8;
   size_t nbytes = elts * sizeof(Element);
-  RootedObject buffer(cx, Shared ? JS_NewSharedArrayBuffer(cx, nbytes)
-                                 : JS_NewArrayBuffer(cx, nbytes));
+  RootedObject buffer(cx, Shared ? JS::NewSharedArrayBuffer(cx, nbytes)
+                                 : JS::NewArrayBuffer(cx, nbytes));
   {
     JS::AutoCheckCannotGC nogc;
     bool isShared;
-    void* data = Shared ? JS_GetSharedArrayBufferData(buffer, &isShared, nogc)
-                        : JS_GetArrayBufferData(buffer, &isShared, nogc);
+    void* data = Shared ? JS::GetSharedArrayBufferData(buffer, &isShared, nogc)
+                        : JS::GetArrayBufferData(buffer, &isShared, nogc);
     CHECK_EQUAL(Shared, isShared);
     memset(data, 1, nbytes);
   }
@@ -190,8 +193,8 @@ bool TestArrayFromBuffer(JSContext* cx) {
 
     CHECK_EQUAL(
         (void*)data,
-        Shared ? (void*)JS_GetSharedArrayBufferData(buffer, &isShared, nogc)
-               : (void*)JS_GetArrayBufferData(buffer, &isShared, nogc));
+        Shared ? (void*)JS::GetSharedArrayBufferData(buffer, &isShared, nogc)
+               : (void*)JS::GetArrayBufferData(buffer, &isShared, nogc));
     CHECK_EQUAL(Shared, isShared);
 
     CHECK_EQUAL(*reinterpret_cast<uint8_t*>(data), 1u);

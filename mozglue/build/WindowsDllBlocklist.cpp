@@ -4,19 +4,19 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #ifdef MOZ_MEMORY
-#define MOZ_MEMORY_IMPL
-#include "mozmemory_wrap.h"
-#define MALLOC_FUNCS MALLOC_FUNCS_MALLOC
+#  define MOZ_MEMORY_IMPL
+#  include "mozmemory_wrap.h"
+#  define MALLOC_FUNCS MALLOC_FUNCS_MALLOC
 // See mozmemory_wrap.h for more details. This file is part of libmozglue, so
 // it needs to use _impl suffixes.
-#define MALLOC_DECL(name, return_type, ...) \
-  MOZ_MEMORY_API return_type name##_impl(__VA_ARGS__);
-#include "malloc_decls.h"
+#  define MALLOC_DECL(name, return_type, ...) \
+    MOZ_MEMORY_API return_type name##_impl(__VA_ARGS__);
+#  include "malloc_decls.h"
+#  include "mozilla/mozalloc.h"
 #endif
 
 #include <windows.h>
 #include <winternl.h>
-#include <io.h>
 
 #pragma warning(push)
 #pragma warning(disable : 4275 4530)  // See msvc-stl-wrapper.template.h
@@ -24,314 +24,68 @@
 #pragma warning(pop)
 
 #include "Authenticode.h"
+#include "CrashAnnotations.h"
+#include "MozglueUtils.h"
+#include "UntrustedDllsHandler.h"
 #include "nsAutoPtr.h"
 #include "nsWindowsDllInterceptor.h"
-#include "mozilla/Sprintf.h"
+#include "mozilla/CmdLineAndEnvUtils.h"
+#include "mozilla/DebugOnly.h"
+#include "mozilla/ScopeExit.h"
 #include "mozilla/StackWalk_windows.h"
+#include "mozilla/TimeStamp.h"
 #include "mozilla/UniquePtr.h"
+#include "mozilla/Vector.h"
 #include "mozilla/WindowsVersion.h"
 #include "nsWindowsHelpers.h"
 #include "WindowsDllBlocklist.h"
 #include "mozilla/AutoProfilerLabel.h"
+#include "mozilla/glue/Debug.h"
 #include "mozilla/glue/WindowsDllServices.h"
 
 using namespace mozilla;
 
-#define ALL_VERSIONS ((unsigned long long)-1LL)
+using CrashReporter::Annotation;
+using CrashReporter::AnnotationToString;
 
-// DLLs sometimes ship without a version number, particularly early
-// releases. Blocking "version <= 0" has the effect of blocking unversioned
-// DLLs (since the call to get version info fails), but not blocking
-// any versioned instance.
-#define UNVERSIONED ((unsigned long long)0LL)
+static glue::Win32SRWLock gDllServicesLock;
+static glue::detail::DllServicesBase* gDllServices;
 
-// Convert the 4 (decimal) components of a DLL version number into a
-// single unsigned long long, as needed by the blocklist
-#define MAKE_VERSION(a, b, c, d) \
-  ((a##ULL << 48) + (b##ULL << 32) + (c##ULL << 16) + d##ULL)
-
-struct DllBlockInfo {
-  // The name of the DLL -- in LOWERCASE!  It will be compared to
-  // a lowercase version of the DLL name only.
-  const char* name;
-
-  // If maxVersion is ALL_VERSIONS, we'll block all versions of this
-  // dll.  Otherwise, we'll block all versions less than or equal to
-  // the given version, as queried by GetFileVersionInfo and
-  // VS_FIXEDFILEINFO's dwFileVersionMS and dwFileVersionLS fields.
-  //
-  // Note that the version is usually 4 components, which is A.B.C.D
-  // encoded as 0x AAAA BBBB CCCC DDDD ULL (spaces added for clarity),
-  // but it's not required to be of that format.
-  //
-  // If the USE_TIMESTAMP flag is set, then we use the timestamp from
-  // the IMAGE_FILE_HEADER in lieu of a version number.
-  //
-  // If the CHILD_PROCESSES_ONLY flag is set, then the dll is blocked
-  // only when we are a child process.
-  unsigned long long maxVersion;
-
-  enum {
-    FLAGS_DEFAULT = 0,
-    BLOCK_WIN8PLUS_ONLY = 1,
-    BLOCK_WIN8_ONLY = 2,
-    USE_TIMESTAMP = 4,
-    CHILD_PROCESSES_ONLY = 8
-  } flags;
-};
-
-static const DllBlockInfo sWindowsDllBlocklist[] = {
-    // EXAMPLE:
-    // { "uxtheme.dll", ALL_VERSIONS },
-    // { "uxtheme.dll", 0x0000123400000000ULL },
-    // The DLL name must be in lowercase!
-    // The version field is a maximum, that is, we block anything that is
-    // less-than or equal to that version.
-
-    // NPFFAddon - Known malware
-    {"npffaddon.dll", ALL_VERSIONS},
-
-    // AVG 8 - Antivirus vendor AVG, old version, plugin already blocklisted
-    {"avgrsstx.dll", MAKE_VERSION(8, 5, 0, 401)},
-
-    // calc.dll - Suspected malware
-    {"calc.dll", MAKE_VERSION(1, 0, 0, 1)},
-
-    // hook.dll - Suspected malware
-    {"hook.dll", ALL_VERSIONS},
-
-    // GoogleDesktopNetwork3.dll - Extremely old, unversioned instances
-    // of this DLL cause crashes
-    {"googledesktopnetwork3.dll", UNVERSIONED},
-
-    // rdolib.dll - Suspected malware
-    {"rdolib.dll", MAKE_VERSION(6, 0, 88, 4)},
-
-    // fgjk4wvb.dll - Suspected malware
-    {"fgjk4wvb.dll", MAKE_VERSION(8, 8, 8, 8)},
-
-    // radhslib.dll - Naomi internet filter - unmaintained since 2006
-    {"radhslib.dll", UNVERSIONED},
-
-    // Music download filter for vkontakte.ru - old instances
-    // of this DLL cause crashes
-    {"vksaver.dll", MAKE_VERSION(2, 2, 2, 0)},
-
-    // Topcrash in Firefox 4.0b1
-    {"rlxf.dll", MAKE_VERSION(1, 2, 323, 1)},
-
-    // psicon.dll - Topcrashes in Thunderbird, and some crashes in Firefox
-    // Adobe photoshop library, now redundant in later installations
-    {"psicon.dll", ALL_VERSIONS},
-
-    // Topcrash in Firefox 4 betas (bug 618899)
-    {"accelerator.dll", MAKE_VERSION(3, 2, 1, 6)},
-
-    // Topcrash with Roboform in Firefox 8 (bug 699134)
-    {"rf-firefox.dll", MAKE_VERSION(7, 6, 1, 0)},
-    {"roboform.dll", MAKE_VERSION(7, 6, 1, 0)},
-
-    // Topcrash with Babylon Toolbar on FF16+ (bug 721264)
-    {"babyfox.dll", ALL_VERSIONS},
-
-    // sprotector.dll crashes, bug 957258
-    {"sprotector.dll", ALL_VERSIONS},
-
-    // leave these two in always for tests
-    {"mozdllblockingtest.dll", ALL_VERSIONS},
-    {"mozdllblockingtest_versioned.dll", 0x0000000400000000ULL},
-
-    // Windows Media Foundation FLAC decoder and type sniffer (bug 839031).
-    {"mfflac.dll", ALL_VERSIONS},
-
-    // Older Relevant Knowledge DLLs cause us to crash (bug 904001).
-    {"rlnx.dll", MAKE_VERSION(1, 3, 334, 9)},
-    {"pmnx.dll", MAKE_VERSION(1, 3, 334, 9)},
-    {"opnx.dll", MAKE_VERSION(1, 3, 334, 9)},
-    {"prnx.dll", MAKE_VERSION(1, 3, 334, 9)},
-
-    // Older belgian ID card software causes Firefox to crash or hang on
-    // shutdown, bug 831285 and 918399.
-    {"beid35cardlayer.dll", MAKE_VERSION(3, 5, 6, 6968)},
-
-    // bug 925459, bitguard crashes
-    {"bitguard.dll", ALL_VERSIONS},
-
-    // bug 812683 - crashes in Windows library when Asus Gamer OSD is installed
-    // Software is discontinued/unsupported
-    {"atkdx11disp.dll", ALL_VERSIONS},
-
-    // Topcrash with Conduit SearchProtect, bug 944542
-    {"spvc32.dll", ALL_VERSIONS},
-
-    // Topcrash with V-bates, bug 1002748 and bug 1023239
-    {"libinject.dll", UNVERSIONED},
-    {"libinject2.dll", 0x537DDC93, DllBlockInfo::USE_TIMESTAMP},
-    {"libredir2.dll", 0x5385B7ED, DllBlockInfo::USE_TIMESTAMP},
-
-    // Crashes with RoboForm2Go written against old SDK, bug 988311/1196859
-    {"rf-firefox-22.dll", ALL_VERSIONS},
-    {"rf-firefox-40.dll", ALL_VERSIONS},
-
-    // Crashes with DesktopTemperature, bug 1046382
-    {"dtwxsvc.dll", 0x53153234, DllBlockInfo::USE_TIMESTAMP},
-
-    // Startup crashes with Lenovo Onekey Theater, bug 1123778
-    {"activedetect32.dll", UNVERSIONED},
-    {"activedetect64.dll", UNVERSIONED},
-    {"windowsapihookdll32.dll", UNVERSIONED},
-    {"windowsapihookdll64.dll", UNVERSIONED},
-
-    // Flash crashes with RealNetworks RealDownloader, bug 1132663
-    {"rndlnpshimswf.dll", ALL_VERSIONS},
-    {"rndlmainbrowserrecordplugin.dll", ALL_VERSIONS},
-
-    // Startup crashes with RealNetworks Browser Record Plugin, bug 1170141
-    {"nprpffbrowserrecordext.dll", ALL_VERSIONS},
-    {"nprndlffbrowserrecordext.dll", ALL_VERSIONS},
-
-    // Crashes with CyberLink YouCam, bug 1136968
-    {"ycwebcamerasource.ax", MAKE_VERSION(2, 0, 0, 1611)},
-
-    // Old version of WebcamMax crashes WebRTC, bug 1130061
-    {"vwcsource.ax", MAKE_VERSION(1, 5, 0, 0)},
-
-    // NetOp School, discontinued product, bug 763395
-    {"nlsp.dll", MAKE_VERSION(6, 23, 2012, 19)},
-
-    // Orbit Downloader, bug 1222819
-    {"grabdll.dll", MAKE_VERSION(2, 6, 1, 0)},
-    {"grabkernel.dll", MAKE_VERSION(1, 0, 0, 1)},
-
-    // ESET, bug 1229252
-    {"eoppmonitor.dll", ALL_VERSIONS},
-
-    // SS2OSD, bug 1262348
-    {"ss2osd.dll", ALL_VERSIONS},
-    {"ss2devprops.dll", ALL_VERSIONS},
-
-    // NHASUSSTRIXOSD.DLL, bug 1269244
-    {"nhasusstrixosd.dll", ALL_VERSIONS},
-    {"nhasusstrixdevprops.dll", ALL_VERSIONS},
-
-    // Crashes with PremierOpinion/RelevantKnowledge, bug 1277846
-    {"opls.dll", ALL_VERSIONS},
-    {"opls64.dll", ALL_VERSIONS},
-    {"pmls.dll", ALL_VERSIONS},
-    {"pmls64.dll", ALL_VERSIONS},
-    {"prls.dll", ALL_VERSIONS},
-    {"prls64.dll", ALL_VERSIONS},
-    {"rlls.dll", ALL_VERSIONS},
-    {"rlls64.dll", ALL_VERSIONS},
-
-    // Vorbis DirectShow filters, bug 1239690.
-    {"vorbis.acm", MAKE_VERSION(0, 0, 3, 6)},
-
-    // AhnLab Internet Security, bug 1311969
-    {"nzbrcom.dll", ALL_VERSIONS},
-
-    // K7TotalSecurity, bug 1339083.
-    {"k7pswsen.dll", MAKE_VERSION(15, 2, 2, 95)},
-
-    // smci*.dll - goobzo crashware (bug 1339908)
-    {"smci32.dll", ALL_VERSIONS},
-    {"smci64.dll", ALL_VERSIONS},
-
-    // Crashes with Internet Download Manager, bug 1333486
-    {"idmcchandler7.dll", ALL_VERSIONS},
-    {"idmcchandler7_64.dll", ALL_VERSIONS},
-    {"idmcchandler5.dll", ALL_VERSIONS},
-    {"idmcchandler5_64.dll", ALL_VERSIONS},
-
-    // Nahimic 2 breaks applicaton update (bug 1356637)
-    {"nahimic2devprops.dll", MAKE_VERSION(2, 5, 19, 0xffff)},
-    // Nahimic is causing crashes, bug 1233556
-    {"nahimicmsiosd.dll", UNVERSIONED},
-    // Nahimic is causing crashes, bug 1360029
-    {"nahimicvrdevprops.dll", UNVERSIONED},
-    {"nahimic2osd.dll", MAKE_VERSION(2, 5, 19, 0xffff)},
-    {"nahimicmsidevprops.dll", UNVERSIONED},
-
-    // Bug 1268470 - crashes with Kaspersky Lab on Windows 8
-    {"klsihk64.dll", MAKE_VERSION(14, 0, 456, 0xffff),
-     DllBlockInfo::BLOCK_WIN8_ONLY},
-
-    // Bug 1407337, crashes with OpenSC < 0.16.0
-    {"onepin-opensc-pkcs11.dll", MAKE_VERSION(0, 15, 0xffff, 0xffff)},
-
-    // Avecto Privilege Guard causes crashes, bug 1385542
-    {"pghook.dll", ALL_VERSIONS},
-
-    // Old versions of G DATA BankGuard, bug 1421991
-    {"banksafe64.dll", MAKE_VERSION(1, 2, 15299, 65535)},
-
-    // Old versions of G DATA, bug 1043775
-    {"gdkbfltdll64.dll", MAKE_VERSION(1, 0, 14141, 240)},
-
-    // NVIDIA nView Desktop Management causes crashes, bug 1465787
-    {"nviewh64.dll", MAKE_VERSION(6, 14, 10, 14847)},
-
-    {nullptr, 0}};
-
-#ifndef STATUS_DLL_NOT_FOUND
-#define STATUS_DLL_NOT_FOUND ((DWORD)0xC0000135L)
-#endif
+#define DLL_BLOCKLIST_ENTRY(name, ...) {name, __VA_ARGS__},
+#define DLL_BLOCKLIST_STRING_TYPE const char*
+#include "mozilla/WindowsDllBlocklistDefs.h"
 
 // define this for very verbose dll load debug spew
 #undef DEBUG_very_verbose
-
-static const char kBlockedDllsParameter[] = "BlockedDllList=";
-static const int kBlockedDllsParameterLen = sizeof(kBlockedDllsParameter) - 1;
-
-static const char kBlocklistInitFailedParameter[] = "BlocklistInitFailed=1\n";
-static const int kBlocklistInitFailedParameterLen =
-    sizeof(kBlocklistInitFailedParameter) - 1;
-
-static const char kUser32BeforeBlocklistParameter[] =
-    "User32BeforeBlocklist=1\n";
-static const int kUser32BeforeBlocklistParameterLen =
-    sizeof(kUser32BeforeBlocklistParameter) - 1;
 
 static uint32_t sInitFlags;
 static bool sBlocklistInitAttempted;
 static bool sBlocklistInitFailed;
 static bool sUser32BeforeBlocklist;
 
-// Duplicated from xpcom glue. Ideally this should be shared.
-void printf_stderr(const char* fmt, ...) {
-  if (IsDebuggerPresent()) {
-    char buf[2048];
-    va_list args;
-    va_start(args, fmt);
-    VsprintfLiteral(buf, fmt, args);
-    va_end(args);
-    OutputDebugStringA(buf);
-  }
-
-  FILE* fp = _fdopen(_dup(2), "a");
-  if (!fp) return;
-
-  va_list args;
-  va_start(args, fmt);
-  vfprintf(fp, fmt, args);
-  va_end(args);
-
-  fclose(fp);
+// This feature is enabled only on NIGHTLY, only for the main process.
+inline static bool IsUntrustedDllsHandlerEnabled() {
+#ifdef NIGHTLY_BUILD
+  return !(sInitFlags & eDllBlocklistInitFlagIsChildProcess);
+#else
+  return false;
+#endif
 }
 
 typedef MOZ_NORETURN_PTR void(__fastcall* BaseThreadInitThunk_func)(
     BOOL aIsInitialThread, void* aStartAddress, void* aThreadParam);
-static BaseThreadInitThunk_func stub_BaseThreadInitThunk = nullptr;
+static WindowsDllInterceptor::FuncHookType<BaseThreadInitThunk_func>
+    stub_BaseThreadInitThunk;
 
 typedef NTSTATUS(NTAPI* LdrLoadDll_func)(PWCHAR filePath, PULONG flags,
                                          PUNICODE_STRING moduleFileName,
                                          PHANDLE handle);
-static LdrLoadDll_func stub_LdrLoadDll;
+static WindowsDllInterceptor::FuncHookType<LdrLoadDll_func> stub_LdrLoadDll;
 
 #ifdef _M_AMD64
 typedef decltype(
     RtlInstallFunctionTableCallback)* RtlInstallFunctionTableCallback_func;
-static RtlInstallFunctionTableCallback_func
+static WindowsDllInterceptor::FuncHookType<RtlInstallFunctionTableCallback_func>
     stub_RtlInstallFunctionTableCallback;
 
 extern uint8_t* sMsMpegJitCodeRegionStart;
@@ -491,7 +245,7 @@ class DllBlockSet {
   DllBlockSet(const char* name, unsigned long long version)
       : mName(name), mVersion(version), mNext(nullptr) {}
 
-  const char* mName;  // points into the sWindowsDllBlocklist string
+  const char* mName;  // points into the gWindowsDllBlocklist string
   unsigned long long mVersion;
   DllBlockSet* mNext;
 
@@ -593,8 +347,18 @@ static wchar_t* lastslash(wchar_t* s, int len) {
 static NTSTATUS NTAPI patched_LdrLoadDll(PWCHAR filePath, PULONG flags,
                                          PUNICODE_STRING moduleFileName,
                                          PHANDLE handle) {
-// We have UCS2 (UTF16?), we want ASCII, but we also just want the filename
-// portion
+  if (IsUntrustedDllsHandlerEnabled()) {
+    glue::UntrustedDllsHandler::EnterLoaderCall();
+  }
+  // Warning: this must be at the top function scope.
+  auto exitLoaderCallScopeExit = MakeScopeExit([]() {
+    if (IsUntrustedDllsHandlerEnabled()) {
+      glue::UntrustedDllsHandler::ExitLoaderCall();
+    }
+  });
+
+  // We have UCS2 (UTF16?), we want ASCII, but we also just want the filename
+  // portion
 #define DLLNAME_MAX 128
   char dllName[DLLNAME_MAX + 1];
   wchar_t* dll_part;
@@ -603,8 +367,6 @@ static NTSTATUS NTAPI patched_LdrLoadDll(PWCHAR filePath, PULONG flags,
   int len = moduleFileName->Length / 2;
   wchar_t* fname = moduleFileName->Buffer;
   UniquePtr<wchar_t[]> full_fname;
-
-  const DllBlockInfo* info = &sWindowsDllBlocklist[0];
 
   // The filename isn't guaranteed to be null terminated, but in practice
   // it always will be; ensure that this is so, and bail if not.
@@ -662,110 +424,115 @@ static NTSTATUS NTAPI patched_LdrLoadDll(PWCHAR filePath, PULONG flags,
   printf_stderr("LdrLoadDll: dll name '%s'\n", dllName);
 #endif
 
-  // Block a suspicious binary that uses various 12-digit hex strings
-  // e.g. MovieMode.48CA2AEFA22D.dll (bug 973138)
-  dot = strchr(dllName, '.');
-  if (dot && (strchr(dot + 1, '.') == dot + 13)) {
-    char* end = nullptr;
-    _strtoui64(dot + 1, &end, 16);
-    if (end == dot + 13) {
-      return STATUS_DLL_NOT_FOUND;
+  if (!(sInitFlags & eDllBlocklistInitFlagWasBootstrapped)) {
+    // Block a suspicious binary that uses various 12-digit hex strings
+    // e.g. MovieMode.48CA2AEFA22D.dll (bug 973138)
+    dot = strchr(dllName, '.');
+    if (dot && (strchr(dot + 1, '.') == dot + 13)) {
+      char* end = nullptr;
+      _strtoui64(dot + 1, &end, 16);
+      if (end == dot + 13) {
+        return STATUS_DLL_NOT_FOUND;
+      }
     }
-  }
-  // Block binaries where the filename is at least 16 hex digits
-  if (dot && ((dot - dllName) >= 16)) {
-    char* current = dllName;
-    while (current < dot && isxdigit(*current)) {
-      current++;
+    // Block binaries where the filename is at least 16 hex digits
+    if (dot && ((dot - dllName) >= 16)) {
+      char* current = dllName;
+      while (current < dot && isxdigit(*current)) {
+        current++;
+      }
+      if (current == dot) {
+        return STATUS_DLL_NOT_FOUND;
+      }
     }
-    if (current == dot) {
-      return STATUS_DLL_NOT_FOUND;
+
+    // then compare to everything on the blocklist
+    DECLARE_POINTER_TO_FIRST_DLL_BLOCKLIST_ENTRY(info);
+    while (info->name) {
+      if (strcmp(info->name, dllName) == 0) break;
+
+      info++;
     }
-  }
 
-  // then compare to everything on the blocklist
-  while (info->name) {
-    if (strcmp(info->name, dllName) == 0) break;
-
-    info++;
-  }
-
-  if (info->name) {
-    bool load_ok = false;
+    if (info->name) {
+      bool load_ok = false;
 
 #ifdef DEBUG_very_verbose
-    printf_stderr("LdrLoadDll: info->name: '%s'\n", info->name);
+      printf_stderr("LdrLoadDll: info->name: '%s'\n", info->name);
 #endif
 
-    if ((info->flags & DllBlockInfo::BLOCK_WIN8PLUS_ONLY) && !IsWin8OrLater()) {
-      goto continue_loading;
-    }
-
-    if ((info->flags & DllBlockInfo::BLOCK_WIN8_ONLY) &&
-        (!IsWin8OrLater() || IsWin8Point1OrLater())) {
-      goto continue_loading;
-    }
-
-    if ((info->flags & DllBlockInfo::CHILD_PROCESSES_ONLY) &&
-        !(sInitFlags & eDllBlocklistInitFlagIsChildProcess)) {
-      goto continue_loading;
-    }
-
-    unsigned long long fVersion = ALL_VERSIONS;
-
-    if (info->maxVersion != ALL_VERSIONS) {
-      ReentrancySentinel sentinel(dllName);
-      if (sentinel.BailOut()) {
+      if ((info->flags & DllBlockInfo::BLOCK_WIN8PLUS_ONLY) &&
+          !IsWin8OrLater()) {
         goto continue_loading;
       }
 
-      full_fname = getFullPath(filePath, fname);
-      if (!full_fname) {
-        // uh, we couldn't find the DLL at all, so...
-        printf_stderr(
-            "LdrLoadDll: Blocking load of '%s' (SearchPathW didn't find it?)\n",
-            dllName);
-        return STATUS_DLL_NOT_FOUND;
+      if ((info->flags & DllBlockInfo::BLOCK_WIN8_ONLY) &&
+          (!IsWin8OrLater() || IsWin8Point1OrLater())) {
+        goto continue_loading;
       }
 
-      if (info->flags & DllBlockInfo::USE_TIMESTAMP) {
-        fVersion = GetTimestamp(full_fname.get());
-        if (fVersion > info->maxVersion) {
-          load_ok = true;
+      if ((info->flags & DllBlockInfo::CHILD_PROCESSES_ONLY) &&
+          !(sInitFlags & eDllBlocklistInitFlagIsChildProcess)) {
+        goto continue_loading;
+      }
+
+      unsigned long long fVersion = ALL_VERSIONS;
+
+      if (info->maxVersion != ALL_VERSIONS) {
+        ReentrancySentinel sentinel(dllName);
+        if (sentinel.BailOut()) {
+          goto continue_loading;
         }
-      } else {
-        DWORD zero;
-        DWORD infoSize = GetFileVersionInfoSizeW(full_fname.get(), &zero);
 
-        // If we failed to get the version information, we block.
+        full_fname = getFullPath(filePath, fname);
+        if (!full_fname) {
+          // uh, we couldn't find the DLL at all, so...
+          printf_stderr(
+              "LdrLoadDll: Blocking load of '%s' (SearchPathW didn't find "
+              "it?)\n",
+              dllName);
+          return STATUS_DLL_NOT_FOUND;
+        }
 
-        if (infoSize != 0) {
-          auto infoData = MakeUnique<unsigned char[]>(infoSize);
-          VS_FIXEDFILEINFO* vInfo;
-          UINT vInfoLen;
+        if (info->flags & DllBlockInfo::USE_TIMESTAMP) {
+          fVersion = GetTimestamp(full_fname.get());
+          if (fVersion > info->maxVersion) {
+            load_ok = true;
+          }
+        } else {
+          DWORD zero;
+          DWORD infoSize = GetFileVersionInfoSizeW(full_fname.get(), &zero);
 
-          if (GetFileVersionInfoW(full_fname.get(), 0, infoSize,
-                                  infoData.get()) &&
-              VerQueryValueW(infoData.get(), L"\\", (LPVOID*)&vInfo,
-                             &vInfoLen)) {
-            fVersion = ((unsigned long long)vInfo->dwFileVersionMS) << 32 |
-                       ((unsigned long long)vInfo->dwFileVersionLS);
+          // If we failed to get the version information, we block.
 
-            // finally do the version check, and if it's greater than our block
-            // version, keep loading
-            if (fVersion > info->maxVersion) load_ok = true;
+          if (infoSize != 0) {
+            auto infoData = MakeUnique<unsigned char[]>(infoSize);
+            VS_FIXEDFILEINFO* vInfo;
+            UINT vInfoLen;
+
+            if (GetFileVersionInfoW(full_fname.get(), 0, infoSize,
+                                    infoData.get()) &&
+                VerQueryValueW(infoData.get(), L"\\", (LPVOID*)&vInfo,
+                               &vInfoLen)) {
+              fVersion = ((unsigned long long)vInfo->dwFileVersionMS) << 32 |
+                         ((unsigned long long)vInfo->dwFileVersionLS);
+
+              // finally do the version check, and if it's greater than our
+              // block version, keep loading
+              if (fVersion > info->maxVersion) load_ok = true;
+            }
           }
         }
       }
-    }
 
-    if (!load_ok) {
-      printf_stderr(
-          "LdrLoadDll: Blocking load of '%s' -- see "
-          "http://www.mozilla.com/en-US/blocklist/\n",
-          dllName);
-      DllBlockSet::Add(info->name, fVersion);
-      return STATUS_DLL_NOT_FOUND;
+      if (!load_ok) {
+        printf_stderr(
+            "LdrLoadDll: Blocking load of '%s' -- see "
+            "http://www.mozilla.com/en-US/blocklist/\n",
+            dllName);
+        DllBlockSet::Add(info->name, fVersion);
+        return STATUS_DLL_NOT_FOUND;
+      }
     }
   }
 
@@ -778,8 +545,7 @@ continue_loading:
   // A few DLLs such as xul.dll and nss3.dll get loaded before mozglue's
   // AutoProfilerLabel is initialized, and this is a no-op in those cases. But
   // the vast majority of DLLs do get labelled here.
-  AutoProfilerLabel label("WindowsDllBlocklist::patched_LdrLoadDll", dllName,
-                          __LINE__);
+  AutoProfilerLabel label("WindowsDllBlocklist::patched_LdrLoadDll", dllName);
 
 #ifdef _M_AMD64
   // Prevent the stack walker from suspending this thread when LdrLoadDll
@@ -787,13 +553,57 @@ continue_loading:
   AutoSuppressStackWalking suppress;
 #endif
 
-  return stub_LdrLoadDll(filePath, flags, moduleFileName, handle);
+  NTSTATUS ret;
+  HANDLE myHandle;
+
+  if (IsUntrustedDllsHandlerEnabled()) {
+    TimeStamp loadStart = TimeStamp::Now();
+    ret = stub_LdrLoadDll(filePath, flags, moduleFileName, &myHandle);
+    TimeStamp loadEnd = TimeStamp::Now();
+
+    if (NT_SUCCESS(ret)) {
+      double loadDurationMS = (loadEnd - loadStart).ToMilliseconds();
+      // Win32 HMODULEs use the bottom two bits as flags. Ensure those bits are
+      // cleared so we're left with the base address value.
+      glue::UntrustedDllsHandler::OnAfterModuleLoad(
+          (uintptr_t)myHandle & ~(uintptr_t)3, moduleFileName, loadDurationMS);
+      glue::AutoSharedLock lock(gDllServicesLock);
+      if (gDllServices) {
+        Vector<glue::ModuleLoadEvent, 0, InfallibleAllocPolicy> events;
+        if (glue::UntrustedDllsHandler::TakePendingEvents(events)) {
+          gDllServices->NotifyUntrustedModuleLoads(events);
+        }
+      }
+    }
+  } else {
+    ret = stub_LdrLoadDll(filePath, flags, moduleFileName, &myHandle);
+  }
+
+  if (handle) {
+    *handle = myHandle;
+  }
+
+  return ret;
 }
+
+#if defined(NIGHTLY_BUILD)
+// Map of specific thread proc addresses we should block. In particular,
+// LoadLibrary* APIs which indicate DLL injection
+static mozilla::Vector<void*, 4>* gStartAddressesToBlock;
+#endif
 
 static bool ShouldBlockThread(void* aStartAddress) {
   // Allows crashfirefox.exe to continue to work. Also if your threadproc is
   // null, this crash is intentional.
   if (aStartAddress == 0) return false;
+
+#if defined(NIGHTLY_BUILD)
+  for (auto p : *gStartAddressesToBlock) {
+    if (p == aStartAddress) {
+      return true;
+    }
+  }
+#endif
 
   bool shouldBlock = false;
   MEMORY_BASIC_INFORMATION startAddressInfo = {0};
@@ -822,12 +632,59 @@ static MOZ_NORETURN void __fastcall patched_BaseThreadInitThunk(
 static WindowsDllInterceptor NtDllIntercept;
 static WindowsDllInterceptor Kernel32Intercept;
 
+static void GetNativeNtBlockSetWriter();
+
 MFBT_API void DllBlocklist_Initialize(uint32_t aInitFlags) {
   if (sBlocklistInitAttempted) {
     return;
   }
   sInitFlags = aInitFlags;
+
+  if (sInitFlags & eDllBlocklistInitFlagWasBootstrapped) {
+    GetNativeNtBlockSetWriter();
+  }
+
   sBlocklistInitAttempted = true;
+#if defined(NIGHTLY_BUILD)
+  gStartAddressesToBlock = new mozilla::Vector<void*, 4>;
+#endif
+
+  if (IsUntrustedDllsHandlerEnabled()) {
+#ifdef ENABLE_TESTS
+    // Check whether we are running as an xpcshell test.
+    if (mozilla::EnvHasValue("XPCSHELL_TEST_PROFILE_DIR")) {
+      // For xpcshell tests, load this untrusted DLL early enough that the
+      // untrusted module evaluator counts it as a startup module.
+      // It is located in the current directory; the full path must be specified
+      // or LoadLibrary() fails during xpcshell tests with ERROR_MOD_NOT_FOUND.
+
+      // This buffer will hold current directory + dll name
+      wchar_t dllFullPath[MAX_PATH] = {};
+      static const wchar_t kTestDllName[] = L"\\untrusted-startup-test-dll.dll";
+
+      // The amount of the buffer available to store the current directory,
+      // leaving room for the dll name.
+      static const DWORD kBufferDirLen =
+          ArrayLength(dllFullPath) - ArrayLength(kTestDllName);
+
+      DWORD ret = ::GetCurrentDirectoryW(kBufferDirLen, dllFullPath);
+      if ((ret > kBufferDirLen) || !ret) {
+        // Buffer too small or the call failed
+        printf_stderr("Unable to load %S; GetCurrentDirectoryW  failed: %lu",
+                      kTestDllName, GetLastError());
+      } else {
+        wcscat_s(dllFullPath, kTestDllName);
+        HMODULE hTestDll = ::LoadLibraryW(dllFullPath);
+        if (!hTestDll) {
+          printf_stderr("Unable to load %S; LoadLibraryW failed: %lu",
+                        kTestDllName, GetLastError());
+        }
+      }
+    }
+#endif
+
+    glue::UntrustedDllsHandler::Init();
+  }
 
   // In order to be effective against AppInit DLLs, the blocklist must be
   // initialized before user32.dll is loaded into the process (bug 932100).
@@ -845,9 +702,8 @@ MFBT_API void DllBlocklist_Initialize(uint32_t aInitFlags) {
   // We specifically use a detour, because there are cases where external
   // code also tries to hook LdrLoadDll, and doesn't know how to relocate our
   // nop space patches. (Bug 951827)
-  bool ok = NtDllIntercept.AddDetour(
-      "LdrLoadDll", reinterpret_cast<intptr_t>(patched_LdrLoadDll),
-      (void**)&stub_LdrLoadDll);
+  bool ok = stub_LdrLoadDll.SetDetour(NtDllIntercept, "LdrLoadDll",
+                                      &patched_LdrLoadDll);
 
   if (!ok) {
     sBlocklistInitFailed = true;
@@ -868,44 +724,99 @@ MFBT_API void DllBlocklist_Initialize(uint32_t aInitFlags) {
 #ifdef _M_AMD64
   if (!IsWin8OrLater()) {
     // The crash that this hook works around is only seen on Win7.
-    Kernel32Intercept.AddHook(
-        "RtlInstallFunctionTableCallback",
-        reinterpret_cast<intptr_t>(patched_RtlInstallFunctionTableCallback),
-        (void**)&stub_RtlInstallFunctionTableCallback);
+    stub_RtlInstallFunctionTableCallback.Set(
+        Kernel32Intercept, "RtlInstallFunctionTableCallback",
+        &patched_RtlInstallFunctionTableCallback);
   }
 #endif
 
   // Bug 1361410: WRusr.dll will overwrite our hook and cause a crash.
   // Workaround: If we detect WRusr.dll, don't hook.
   if (!GetModuleHandleW(L"WRusr.dll")) {
-    if (!Kernel32Intercept.AddDetour(
-            "BaseThreadInitThunk",
-            reinterpret_cast<intptr_t>(patched_BaseThreadInitThunk),
-            (void**)&stub_BaseThreadInitThunk)) {
+    if (!stub_BaseThreadInitThunk.SetDetour(Kernel32Intercept,
+                                            "BaseThreadInitThunk",
+                                            &patched_BaseThreadInitThunk)) {
 #ifdef DEBUG
       printf_stderr("BaseThreadInitThunk hook failed\n");
 #endif
     }
   }
+
+#if defined(NIGHTLY_BUILD)
+  // Populate a list of thread start addresses to block.
+  HMODULE hKernel = GetModuleHandleW(L"kernel32.dll");
+  if (hKernel) {
+    void* pProc;
+
+    pProc = (void*)GetProcAddress(hKernel, "LoadLibraryA");
+    if (pProc) {
+      Unused << gStartAddressesToBlock->append(pProc);
+    }
+
+    pProc = (void*)GetProcAddress(hKernel, "LoadLibraryW");
+    if (pProc) {
+      Unused << gStartAddressesToBlock->append(pProc);
+    }
+
+    pProc = (void*)GetProcAddress(hKernel, "LoadLibraryExA");
+    if (pProc) {
+      Unused << gStartAddressesToBlock->append(pProc);
+    }
+
+    pProc = (void*)GetProcAddress(hKernel, "LoadLibraryExW");
+    if (pProc) {
+      Unused << gStartAddressesToBlock->append(pProc);
+    }
+  }
+#endif
 }
 
-MFBT_API void DllBlocklist_WriteNotes(HANDLE file) {
+#ifdef DEBUG
+MFBT_API void DllBlocklist_Shutdown() {
+  if (IsUntrustedDllsHandlerEnabled()) {
+    glue::UntrustedDllsHandler::Shutdown();
+  }
+}
+#endif  // DEBUG
+
+static void WriteAnnotation(HANDLE aFile, Annotation aAnnotation,
+                            const char* aValue, DWORD* aNumBytes) {
+  const char* str = AnnotationToString(aAnnotation);
+  WriteFile(aFile, str, strlen(str), aNumBytes, nullptr);
+  WriteFile(aFile, "=", 1, aNumBytes, nullptr);
+  WriteFile(aFile, aValue, strlen(aValue), aNumBytes, nullptr);
+}
+
+static void InternalWriteNotes(HANDLE file) {
   DWORD nBytes;
 
-  WriteFile(file, kBlockedDllsParameter, kBlockedDllsParameterLen, &nBytes,
-            nullptr);
+  WriteAnnotation(file, Annotation::BlockedDllList, "", &nBytes);
   DllBlockSet::Write(file);
   WriteFile(file, "\n", 1, &nBytes, nullptr);
 
   if (sBlocklistInitFailed) {
-    WriteFile(file, kBlocklistInitFailedParameter,
-              kBlocklistInitFailedParameterLen, &nBytes, nullptr);
+    WriteAnnotation(file, Annotation::BlocklistInitFailed, "1\n", &nBytes);
   }
 
   if (sUser32BeforeBlocklist) {
-    WriteFile(file, kUser32BeforeBlocklistParameter,
-              kUser32BeforeBlocklistParameterLen, &nBytes, nullptr);
+    WriteAnnotation(file, Annotation::User32BeforeBlocklist, "1\n", &nBytes);
   }
+}
+
+using WriterFn = void (*)(HANDLE);
+static WriterFn gWriterFn = &InternalWriteNotes;
+
+static void GetNativeNtBlockSetWriter() {
+  auto nativeWriter = reinterpret_cast<WriterFn>(
+      ::GetProcAddress(::GetModuleHandleW(nullptr), "NativeNtBlockSet_Write"));
+  if (nativeWriter) {
+    gWriterFn = nativeWriter;
+  }
+}
+
+MFBT_API void DllBlocklist_WriteNotes(HANDLE file) {
+  MOZ_ASSERT(gWriterFn);
+  gWriterFn(file);
 }
 
 MFBT_API bool DllBlocklist_CheckStatus() {
@@ -916,43 +827,6 @@ MFBT_API bool DllBlocklist_CheckStatus() {
 // ============================================================================
 // This section is for DLL Services
 // ============================================================================
-
-static SRWLOCK gDllServicesLock = SRWLOCK_INIT;
-static mozilla::glue::detail::DllServicesBase* gDllServices;
-
-class MOZ_RAII AutoSharedLock final {
- public:
-  explicit AutoSharedLock(SRWLOCK& aLock) : mLock(aLock) {
-    ::AcquireSRWLockShared(&aLock);
-  }
-
-  ~AutoSharedLock() { ::ReleaseSRWLockShared(&mLock); }
-
-  AutoSharedLock(const AutoSharedLock&) = delete;
-  AutoSharedLock(AutoSharedLock&&) = delete;
-  AutoSharedLock& operator=(const AutoSharedLock&) = delete;
-  AutoSharedLock& operator=(AutoSharedLock&&) = delete;
-
- private:
-  SRWLOCK& mLock;
-};
-
-class MOZ_RAII AutoExclusiveLock final {
- public:
-  explicit AutoExclusiveLock(SRWLOCK& aLock) : mLock(aLock) {
-    ::AcquireSRWLockExclusive(&aLock);
-  }
-
-  ~AutoExclusiveLock() { ::ReleaseSRWLockExclusive(&mLock); }
-
-  AutoExclusiveLock(const AutoExclusiveLock&) = delete;
-  AutoExclusiveLock(AutoExclusiveLock&&) = delete;
-  AutoExclusiveLock& operator=(const AutoExclusiveLock&) = delete;
-  AutoExclusiveLock& operator=(AutoExclusiveLock&&) = delete;
-
- private:
-  SRWLOCK& mLock;
-};
 
 // These types are documented on MSDN but not provided in any SDK headers
 
@@ -1002,7 +876,7 @@ static VOID CALLBACK DllLoadNotification(
     return;
   }
 
-  AutoSharedLock lock(gDllServicesLock);
+  glue::AutoSharedLock lock(gDllServicesLock);
   if (!gDllServices) {
     return;
   }
@@ -1015,10 +889,9 @@ namespace mozilla {
 Authenticode* GetAuthenticode();
 }  // namespace mozilla
 
-MFBT_API void DllBlocklist_SetDllServices(
+MFBT_API void DllBlocklist_SetFullDllServices(
     mozilla::glue::detail::DllServicesBase* aSvc) {
-  AutoExclusiveLock lock(gDllServicesLock);
-
+  glue::AutoExclusiveLock lock(gDllServicesLock);
   if (aSvc) {
     aSvc->SetAuthenticodeImpl(GetAuthenticode());
 
@@ -1030,11 +903,27 @@ MFBT_API void DllBlocklist_SetDllServices(
 
       MOZ_DIAGNOSTIC_ASSERT(pLdrRegisterDllNotification);
 
-      NTSTATUS ntStatus = pLdrRegisterDllNotification(
+      mozilla::DebugOnly<NTSTATUS> ntStatus = pLdrRegisterDllNotification(
           0, &DllLoadNotification, nullptr, &gNotificationCookie);
-      MOZ_DIAGNOSTIC_ASSERT(NT_SUCCESS(ntStatus));
+      MOZ_ASSERT(NT_SUCCESS(ntStatus));
     }
   }
 
   gDllServices = aSvc;
+
+  if (IsUntrustedDllsHandlerEnabled() && gDllServices) {
+    Vector<glue::ModuleLoadEvent, 0, InfallibleAllocPolicy> events;
+    if (glue::UntrustedDllsHandler::TakePendingEvents(events)) {
+      gDllServices->NotifyUntrustedModuleLoads(events);
+    }
+  }
+}
+
+MFBT_API void DllBlocklist_SetBasicDllServices(
+    mozilla::glue::detail::DllServicesBase* aSvc) {
+  if (!aSvc) {
+    return;
+  }
+
+  aSvc->SetAuthenticodeImpl(GetAuthenticode());
 }

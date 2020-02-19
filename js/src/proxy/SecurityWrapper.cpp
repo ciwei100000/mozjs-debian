@@ -1,5 +1,5 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
- * vim: set ts=8 sts=4 et sw=4 tw=99:
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+ * vim: set ts=8 sts=2 et sw=2 tw=80:
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -8,10 +8,14 @@
 #include "jsfriendapi.h"
 #include "NamespaceImports.h"
 
+#include "js/StableStringChars.h"
 #include "js/Wrapper.h"
+#include "vm/JSObject.h"
 #include "vm/StringType.h"
 
 using namespace js;
+
+using JS::AutoStableStringChars;
 
 template <class Base>
 bool SecurityWrapper<Base>::enter(JSContext* cx, HandleObject wrapper,
@@ -98,16 +102,7 @@ bool SecurityWrapper<Base>::defineProperty(JSContext* cx, HandleObject wrapper,
                                            Handle<PropertyDescriptor> desc,
                                            ObjectOpResult& result) const {
   if (desc.getter() || desc.setter()) {
-    RootedValue idVal(cx, IdToValue(id));
-    JSString* str = ValueToSource(cx, idVal);
-    if (!str) return false;
-    AutoStableStringChars chars(cx);
-    const char16_t* prop = nullptr;
-    if (str->ensureFlat(cx) && chars.initTwoByte(cx, str))
-      prop = chars.twoByteChars();
-    JS_ReportErrorNumberUC(cx, GetErrorMessage, nullptr,
-                           JSMSG_ACCESSOR_DEF_DENIED, prop);
-    return false;
+    return Throw(cx, id, JSMSG_ACCESSOR_DEF_DENIED);
   }
 
   return Base::defineProperty(cx, wrapper, id, desc, result);

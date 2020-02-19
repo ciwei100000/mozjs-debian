@@ -7,15 +7,20 @@
 #ifndef mozilla_glue_WindowsDllServices_h
 #define mozilla_glue_WindowsDllServices_h
 
+#include "mozilla/Assertions.h"
 #include "mozilla/Authenticode.h"
+#include "mozilla/mozalloc.h"
+#include "mozilla/UniquePtr.h"
+#include "mozilla/Vector.h"
 #include "mozilla/WindowsDllBlocklist.h"
 
 #if defined(MOZILLA_INTERNAL_API)
 
-#include "mozilla/SystemGroup.h"
-#include "nsISupportsImpl.h"
-#include "nsString.h"
-#include "nsThreadUtils.h"
+#  include "MainThreadUtils.h"
+#  include "mozilla/SystemGroup.h"
+#  include "nsISupportsImpl.h"
+#  include "nsString.h"
+#  include "nsThreadUtils.h"
 
 #endif  // defined(MOZILLA_INTERNAL_API)
 
@@ -24,6 +29,44 @@
 
 namespace mozilla {
 namespace glue {
+
+// Holds data about a top-level DLL load event, for the purposes of later
+// evaluating the DLLs for trustworthiness. DLLs are loaded recursively,
+// so we hold the top-level DLL and all child DLLs in mModules.
+class ModuleLoadEvent {
+ public:
+  class ModuleInfo {
+   public:
+    ModuleInfo() = default;
+    ~ModuleInfo() = default;
+    ModuleInfo(const ModuleInfo& aOther) = delete;
+    ModuleInfo(ModuleInfo&& aOther) = default;
+
+    ModuleInfo operator=(const ModuleInfo& aOther) = delete;
+    ModuleInfo operator=(ModuleInfo&& aOther) = delete;
+
+    uintptr_t mBase;
+    UniquePtr<wchar_t[]> mLdrName;
+    UniquePtr<wchar_t[]> mFullPath;
+    double mLoadDurationMS;
+  };
+
+  ModuleLoadEvent() = default;
+  ~ModuleLoadEvent() = default;
+  ModuleLoadEvent(const ModuleLoadEvent& aOther) = delete;
+  ModuleLoadEvent(ModuleLoadEvent&& aOther) = default;
+
+  ModuleLoadEvent& operator=(const ModuleLoadEvent& aOther) = delete;
+  ModuleLoadEvent& operator=(ModuleLoadEvent&& aOther) = delete;
+
+  DWORD mThreadID;
+  uint64_t mProcessUptimeMS;
+  Vector<ModuleInfo, 0, InfallibleAllocPolicy> mModules;
+
+  // Stores instruction pointers, top-to-bottom.
+  Vector<uintptr_t, 0, InfallibleAllocPolicy> mStack;
+};
+
 namespace detail {
 
 class DllServicesBase : public Authenticode {
@@ -36,11 +79,30 @@ class DllServicesBase : public Authenticode {
    */
   virtual void DispatchDllLoadNotification(PCUNICODE_STRING aDllName) = 0;
 
+  /**
+   * This function accepts module load events to be processed later for
+   * the untrusted modules telemetry ping.
+   *
+   * WARNING: This method is run from within the Windows loader and should
+   *          only perform trivial, loader-friendly, operations.
+   */
+  virtual void NotifyUntrustedModuleLoads(
+      const Vector<glue::ModuleLoadEvent, 0, InfallibleAllocPolicy>&
+          aEvents) = 0;
+
   void SetAuthenticodeImpl(Authenticode* aAuthenticode) {
     mAuthenticode = aAuthenticode;
   }
 
-  UniquePtr<wchar_t[]> GetBinaryOrgName(const wchar_t* aFilePath) final {
+  // In debug builds, we override GetBinaryOrgName to add a Gecko-specific
+  // assertion. OTOH, we normally do not want people overriding this function,
+  // so we'll make it final in the release case, thus covering all bases.
+#if defined(DEBUG)
+  UniquePtr<wchar_t[]> GetBinaryOrgName(const wchar_t* aFilePath) override
+#else
+  UniquePtr<wchar_t[]> GetBinaryOrgName(const wchar_t* aFilePath) final
+#endif  // defined(DEBUG)
+  {
     if (!mAuthenticode) {
       return nullptr;
     }
@@ -48,7 +110,7 @@ class DllServicesBase : public Authenticode {
     return mAuthenticode->GetBinaryOrgName(aFilePath);
   }
 
-  void Disable() { DllBlocklist_SetDllServices(nullptr); }
+  void DisableFull() { DllBlocklist_SetFullDllServices(nullptr); }
 
   DllServicesBase(const DllServicesBase&) = delete;
   DllServicesBase(DllServicesBase&&) = delete;
@@ -60,7 +122,8 @@ class DllServicesBase : public Authenticode {
 
   virtual ~DllServicesBase() = default;
 
-  void Enable() { DllBlocklist_SetDllServices(this); }
+  void EnableFull() { DllBlocklist_SetFullDllServices(this); }
+  void EnableBasic() { DllBlocklist_SetBasicDllServices(this); }
 
  private:
   Authenticode* mAuthenticode;
@@ -83,6 +146,15 @@ class DllServices : public detail::DllServicesBase {
     SystemGroup::Dispatch(TaskCategory::Other, runnable.forget());
   }
 
+#  if defined(DEBUG)
+  UniquePtr<wchar_t[]> GetBinaryOrgName(const wchar_t* aFilePath) final {
+    // This function may perform disk I/O, so we should never call it on the
+    // main thread.
+    MOZ_ASSERT(!NS_IsMainThread());
+    return detail::DllServicesBase::GetBinaryOrgName(aFilePath);
+  }
+#  endif  // defined(DEBUG)
+
   NS_INLINE_DECL_THREADSAFE_VIRTUAL_REFCOUNTING(DllServices)
 
  protected:
@@ -95,14 +167,19 @@ class DllServices : public detail::DllServicesBase {
 
 #else
 
-class BasicDllServices : public detail::DllServicesBase {
+class BasicDllServices final : public detail::DllServicesBase {
  public:
-  BasicDllServices() { Enable(); }
+  BasicDllServices() { EnableBasic(); }
 
-  ~BasicDllServices() { Disable(); }
+  ~BasicDllServices() = default;
 
+  // Not useful in this class, so provide a default implementation
   virtual void DispatchDllLoadNotification(PCUNICODE_STRING aDllName) override {
   }
+
+  virtual void NotifyUntrustedModuleLoads(
+      const Vector<glue::ModuleLoadEvent, 0, InfallibleAllocPolicy>& aEvents)
+      override {}
 };
 
 #endif  // defined(MOZILLA_INTERNAL_API)

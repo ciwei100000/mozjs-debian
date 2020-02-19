@@ -1,5 +1,5 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
- * vim: set ts=8 sts=4 et sw=4 tw=99:
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+ * vim: set ts=8 sts=2 et sw=2 tw=80:
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -66,16 +66,20 @@ class SplayTree {
   bool empty() const { return !root; }
 
   T* maybeLookup(const T& v) {
-    if (!root) return nullptr;
+    if (!root) {
+      return nullptr;
+    }
     Node* last = lookup(v);
     return (C::compare(v, last->item) == 0) ? &(last->item) : nullptr;
   }
 
   bool contains(const T& v, T* res) {
-    if (!root) return false;
+    if (!root) {
+      return false;
+    }
     Node* last = lookup(v);
     splay(last);
-    checkCoherency(root, nullptr);
+    checkCoherency();
     if (C::compare(v, last->item) == 0) {
       *res = last->item;
       return true;
@@ -85,7 +89,9 @@ class SplayTree {
 
   MOZ_MUST_USE bool insert(const T& v) {
     Node* element = allocateNode(v);
-    if (!element) return false;
+    if (!element) {
+      return false;
+    }
 
     if (!root) {
       root = element;
@@ -95,7 +101,7 @@ class SplayTree {
     int cmp = C::compare(v, last->item);
 
     // Don't tolerate duplicate elements.
-    MOZ_ASSERT(cmp);
+    MOZ_DIAGNOSTIC_ASSERT(cmp);
 
     Node*& parentPointer = (cmp < 0) ? last->left : last->right;
     MOZ_ASSERT(!parentPointer);
@@ -103,7 +109,7 @@ class SplayTree {
     element->parent = last;
 
     splay(element);
-    checkCoherency(root, nullptr);
+    checkCoherency();
     return true;
   }
 
@@ -121,11 +127,15 @@ class SplayTree {
     Node* swapChild;
     if (root->left) {
       swap = root->left;
-      while (swap->right) swap = swap->right;
+      while (swap->right) {
+        swap = swap->right;
+      }
       swapChild = swap->left;
     } else if (root->right) {
       swap = root->right;
-      while (swap->left) swap = swap->left;
+      while (swap->left) {
+        swap = swap->left;
+      }
       swapChild = swap->right;
     } else {
       freeNode(root);
@@ -135,16 +145,19 @@ class SplayTree {
 
     // The selected node has at most one child, in swapChild. Detach it
     // from the subtree by replacing it with that child.
-    if (swap == swap->parent->left)
+    if (swap == swap->parent->left) {
       swap->parent->left = swapChild;
-    else
+    } else {
       swap->parent->right = swapChild;
-    if (swapChild) swapChild->parent = swap->parent;
+    }
+    if (swapChild) {
+      swapChild->parent = swap->parent;
+    }
 
     root->item = swap->item;
     freeNode(swap);
 
-    checkCoherency(root, nullptr);
+    checkCoherency();
   }
 
   template <class Op>
@@ -160,12 +173,13 @@ class SplayTree {
     do {
       parent = node;
       int c = C::compare(v, node->item);
-      if (c == 0)
+      if (c == 0) {
         return node;
-      else if (c < 0)
+      } else if (c < 0) {
         node = node->left;
-      else
+      } else {
         node = node->right;
+      }
     } while (node);
     return parent;
   }
@@ -220,7 +234,9 @@ class SplayTree {
       //   y  c  ==>  a  x
       //  a b           b c
       parent->left = node->right;
-      if (node->right) node->right->parent = parent;
+      if (node->right) {
+        node->right->parent = parent;
+      }
       node->right = parent;
     } else {
       MOZ_ASSERT(parent->right == node);
@@ -228,16 +244,19 @@ class SplayTree {
       //  a  y   ==>   x  c
       //    b c       a b
       parent->right = node->left;
-      if (node->left) node->left->parent = parent;
+      if (node->left) {
+        node->left->parent = parent;
+      }
       node->left = parent;
     }
     node->parent = parent->parent;
     parent->parent = node;
     if (Node* grandparent = node->parent) {
-      if (grandparent->left == parent)
+      if (grandparent->left == parent) {
         grandparent->left = node;
-      else
+      } else {
         grandparent->right = node;
+      }
     } else {
       root = node;
     }
@@ -245,34 +264,87 @@ class SplayTree {
 
   template <class Op>
   void forEachInner(Op op, Node* node) {
-    if (!node) return;
+    if (!node) {
+      return;
+    }
 
     forEachInner<Op>(op, node->left);
     op(node->item);
     forEachInner<Op>(op, node->right);
   }
 
-  Node* checkCoherency(Node* node, Node* minimum) {
+  void checkCoherency() const {
 #ifdef DEBUG
-    if (!enableCheckCoherency) return nullptr;
-    if (!node) {
-      MOZ_ASSERT(!root);
-      return nullptr;
+    if (!enableCheckCoherency) {
+      return;
     }
-    MOZ_ASSERT_IF(!node->parent, node == root);
-    MOZ_ASSERT_IF(minimum, C::compare(minimum->item, node->item) < 0);
-    if (node->left) {
-      MOZ_ASSERT(node->left->parent == node);
-      Node* leftMaximum = checkCoherency(node->left, minimum);
-      MOZ_ASSERT(C::compare(leftMaximum->item, node->item) < 0);
+    if (!root) {
+      return;
     }
-    if (node->right) {
-      MOZ_ASSERT(node->right->parent == node);
-      return checkCoherency(node->right, node);
+    MOZ_ASSERT(root->parent == nullptr);
+    const Node* node = root;
+    const Node* minimum = nullptr;
+    MOZ_ASSERT_IF(node->left, node->left->parent == node);
+    MOZ_ASSERT_IF(node->right, node->right->parent == node);
+
+    // This is doing a depth-first search and check that the values are
+    // ordered properly.
+    while (true) {
+      // Go to the left-most child.
+      while (node->left) {
+        MOZ_ASSERT_IF(node->left, node->left->parent == node);
+        MOZ_ASSERT_IF(node->right, node->right->parent == node);
+        node = node->left;
+      }
+
+      MOZ_ASSERT_IF(minimum, C::compare(minimum->item, node->item) < 0);
+      minimum = node;
+
+      if (node->right) {
+        // Go once to the right and try again.
+        MOZ_ASSERT_IF(node->left, node->left->parent == node);
+        MOZ_ASSERT_IF(node->right, node->right->parent == node);
+        node = node->right;
+      } else {
+        // We reached a leaf node, move to the first branch to the right of
+        // our current left-most sub-tree.
+        MOZ_ASSERT(!node->left && !node->right);
+        const Node* prev = nullptr;
+
+        // Visit the parent node, to find the right branch which we have
+        // not visited yet. Either we are coming back from the right
+        // branch, or we are coming back from the left branch with no
+        // right branch to visit.
+        while (node->parent) {
+          prev = node;
+          node = node->parent;
+
+          // If we came back from the left branch, visit the value.
+          if (node->left == prev) {
+            MOZ_ASSERT_IF(minimum, C::compare(minimum->item, node->item) < 0);
+            minimum = node;
+          }
+
+          if (node->right != prev && node->right != nullptr) {
+            break;
+          }
+        }
+
+        if (!node->parent) {
+          MOZ_ASSERT(node == root);
+          // We reached the root node either because we came back from
+          // the right hand side, or because the root node had a
+          // single child.
+          if (node->right == prev || node->right == nullptr) {
+            return;
+          }
+        }
+
+        // Go to the right node which we have not visited yet.
+        MOZ_ASSERT(node->right != prev && node->right != nullptr);
+        node = node->right;
+      }
     }
-    return node;
-#else
-    return nullptr;
 #endif
   }
 };

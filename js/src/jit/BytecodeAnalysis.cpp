@@ -1,5 +1,5 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
- * vim: set ts=8 sts=4 et sw=4 tw=99:
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+ * vim: set ts=8 sts=2 et sw=2 tw=80:
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -16,7 +16,10 @@ using namespace js;
 using namespace js::jit;
 
 BytecodeAnalysis::BytecodeAnalysis(TempAllocator& alloc, JSScript* script)
-    : script_(script), infos_(alloc), usesEnvironmentChain_(false) {}
+    : script_(script),
+      infos_(alloc),
+      usesEnvironmentChain_(false),
+      hasTryFinally_(false) {}
 
 // Bytecode range containing only catch or finally code.
 struct CatchFinallyRange {
@@ -33,7 +36,9 @@ struct CatchFinallyRange {
 };
 
 bool BytecodeAnalysis::init(TempAllocator& alloc, GSNCache& gsn) {
-  if (!infos_.growByUninitialized(script_->length())) return false;
+  if (!infos_.growByUninitialized(script_->length())) {
+    return false;
+  }
 
   // Initialize the env chain slot if either the function needs some
   // EnvironmentObject (like a CallObject) or the script uses the env
@@ -61,13 +66,16 @@ bool BytecodeAnalysis::init(TempAllocator& alloc, GSNCache& gsn) {
             int(script_->pcToOffset(pc)), int(script_->length()), CodeName[op]);
 
     // If this bytecode info has not yet been initialized, it's not reachable.
-    if (!infos_[offset].initialized) continue;
+    if (!infos_[offset].initialized) {
+      continue;
+    }
 
     unsigned stackDepth = infos_[offset].stackDepth;
 #ifdef DEBUG
     for (jsbytecode* chkpc = pc + 1; chkpc < (pc + GetBytecodeLength(pc));
-         chkpc++)
+         chkpc++) {
       MOZ_ASSERT(!infos_[script_->pcToOffset(chkpc)].initialized);
+    }
 #endif
 
     unsigned nuses = GetUseCount(pc);
@@ -92,26 +100,24 @@ bool BytecodeAnalysis::init(TempAllocator& alloc, GSNCache& gsn) {
         infos_[defaultOffset].init(stackDepth);
         infos_[defaultOffset].jumpTarget = true;
 
-        for (int32_t i = low; i <= high; i++) {
-          unsigned targetOffset = offset + GET_JUMP_OFFSET(pc2);
-          if (targetOffset != offset) {
+        uint32_t ncases = high - low + 1;
+
+        for (uint32_t i = 0; i < ncases; i++) {
+          unsigned targetOffset = script_->tableSwitchCaseOffset(pc, i);
+          if (targetOffset != defaultOffset) {
             infos_[targetOffset].init(stackDepth);
             infos_[targetOffset].jumpTarget = true;
           }
-          pc2 += JUMP_OFFSET_LEN;
         }
         break;
       }
 
       case JSOP_TRY: {
-        JSTryNote* tn = script_->trynotes()->vector;
-        JSTryNote* tnlimit = tn + script_->trynotes()->length;
-        for (; tn < tnlimit; tn++) {
-          unsigned startOffset = script_->mainOffset() + tn->start;
-          if (startOffset == offset + 1) {
-            unsigned catchOffset = startOffset + tn->length;
+        for (const JSTryNote& tn : script_->trynotes()) {
+          if (tn.start == offset + 1) {
+            unsigned catchOffset = tn.start + tn.length;
 
-            if (tn->kind != JSTRY_FOR_IN) {
+            if (tn.kind != JSTRY_FOR_IN) {
               infos_[catchOffset].init(stackDepth);
               infos_[catchOffset].jumpTarget = true;
             }
@@ -123,7 +129,8 @@ bool BytecodeAnalysis::init(TempAllocator& alloc, GSNCache& gsn) {
         jssrcnote* sn = GetSrcNote(gsn, script_, pc);
         MOZ_ASSERT(SN_TYPE(sn) == SRC_TRY);
 
-        jsbytecode* endOfTry = pc + GetSrcNoteOffset(sn, 0);
+        jsbytecode* endOfTry =
+            pc + GetSrcNoteOffset(sn, SrcNote::Try::EndOfTryJumpOffset);
         MOZ_ASSERT(JSOp(*endOfTry) == JSOP_GOTO);
 
         jsbytecode* afterTry = endOfTry + GET_JUMP_OFFSET(endOfTry);
@@ -137,19 +144,23 @@ bool BytecodeAnalysis::init(TempAllocator& alloc, GSNCache& gsn) {
 
         // Pop CatchFinallyRanges that are no longer needed.
         while (!catchFinallyRanges.empty() &&
-               catchFinallyRanges.back().end <= offset)
+               catchFinallyRanges.back().end <= offset) {
           catchFinallyRanges.popBack();
+        }
 
         CatchFinallyRange range(script_->pcToOffset(endOfTry),
                                 script_->pcToOffset(afterTry));
-        if (!catchFinallyRanges.append(range)) return false;
+        if (!catchFinallyRanges.append(range)) {
+          return false;
+        }
         break;
       }
 
       case JSOP_LOOPENTRY:
         for (size_t i = 0; i < catchFinallyRanges.length(); i++) {
-          if (catchFinallyRanges[i].contains(offset))
+          if (catchFinallyRanges[i].contains(offset)) {
             infos_[offset].loopEntryInCatchOrFinally = true;
+          }
         }
         break;
 
@@ -165,6 +176,8 @@ bool BytecodeAnalysis::init(TempAllocator& alloc, GSNCache& gsn) {
       case JSOP_LAMBDA_ARROW:
       case JSOP_DEFFUN:
       case JSOP_DEFVAR:
+      case JSOP_DEFLET:
+      case JSOP_DEFCONST:
       case JSOP_PUSHLEXICALENV:
       case JSOP_POPLEXICALENV:
       case JSOP_IMPLICITTHIS:
@@ -175,7 +188,9 @@ bool BytecodeAnalysis::init(TempAllocator& alloc, GSNCache& gsn) {
       case JSOP_SETGNAME:
       case JSOP_STRICTSETGNAME:
       case JSOP_GIMPLICITTHIS:
-        if (script_->hasNonSyntacticScope()) usesEnvironmentChain_ = true;
+        if (script_->hasNonSyntacticScope()) {
+          usesEnvironmentChain_ = true;
+        }
         break;
 
       default:
@@ -186,7 +201,9 @@ bool BytecodeAnalysis::init(TempAllocator& alloc, GSNCache& gsn) {
     if (jump) {
       // Case instructions do not push the lvalue back when branching.
       unsigned newStackDepth = stackDepth;
-      if (op == JSOP_CASE) newStackDepth--;
+      if (op == JSOP_CASE) {
+        newStackDepth--;
+      }
 
       unsigned targetOffset = offset + GET_JUMP_OFFSET(pc);
 
@@ -197,7 +214,9 @@ bool BytecodeAnalysis::init(TempAllocator& alloc, GSNCache& gsn) {
       infos_[targetOffset].init(newStackDepth);
       infos_[targetOffset].jumpTarget = true;
 
-      if (jumpBack) nextpc = script_->offsetToPC(targetOffset);
+      if (jumpBack) {
+        nextpc = script_->offsetToPC(targetOffset);
+      }
     }
 
     // Handle any fallthrough from this opcode.
@@ -209,7 +228,9 @@ bool BytecodeAnalysis::init(TempAllocator& alloc, GSNCache& gsn) {
       infos_[fallthroughOffset].init(stackDepth);
 
       // Treat the fallthrough of a branch instruction as a jump target.
-      if (jump) infos_[fallthroughOffset].jumpTarget = true;
+      if (jump) {
+        infos_[fallthroughOffset].jumpTarget = true;
+      }
     }
   }
 

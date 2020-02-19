@@ -1,5 +1,5 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
- * vim: set ts=8 sts=4 et sw=4 tw=99:
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+ * vim: set ts=8 sts=2 et sw=2 tw=80:
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -17,7 +17,31 @@
 namespace js {
 namespace jit {
 
-enum class OptimizationLevel : uint8_t { Normal, Wasm, Count, DontCompile };
+// [SMDOC] Ion Optimization Levels
+//
+// Ion can do aggressive inlining, but inlining a lot of code will have a
+// negative effect on compilation time and memory usage. It also means we spend
+// more time in the slower Baseline code while compiling the Ion code
+// off-thread or after an invalidation.
+//
+// To address this, Ion consists of two tiers:
+//
+// * Normal: the first tier (warm-up threshold of 1,000) only inlines small
+//           functions one level deep. This tier also has recompile checks to
+//           recompile the script when it becomes very hot.
+//
+// * Full: the second tier (warm-up threshold of 100,000) is only used for very
+//         hot code so we can afford inlining a lot more code.
+//
+// See MRecompileCheck::RecompileCheckType for more info.
+
+enum class OptimizationLevel : uint8_t {
+  Normal,
+  Full,
+  Wasm,
+  Count,
+  DontCompile
+};
 
 #ifdef JS_JITSPEW
 inline const char* OptimizationLevelString(OptimizationLevel level) {
@@ -26,6 +50,8 @@ inline const char* OptimizationLevelString(OptimizationLevel level) {
       return "Optimization_DontCompile";
     case OptimizationLevel::Normal:
       return "Optimization_Normal";
+    case OptimizationLevel::Full:
+      return "Optimization_Full";
     case OptimizationLevel::Wasm:
       return "Optimization_Wasm";
     case OptimizationLevel::Count:;
@@ -34,8 +60,8 @@ inline const char* OptimizationLevelString(OptimizationLevel level) {
 }
 #endif
 
+// Class representing the Ion optimization settings for an OptimizationLevel.
 class OptimizationInfo {
- public:
   OptimizationLevel level_;
 
   // Toggles whether Effective Address Analysis is performed.
@@ -56,9 +82,6 @@ class OptimizationInfo {
   // Toggles whether native scripts get inlined.
   bool inlineNative_;
 
-  // Toggles whether eager unboxing of SIMD is used.
-  bool eagerSimdUnbox_;
-
   // Toggles whether global value numbering is used.
   bool gvn_;
 
@@ -67,9 +90,6 @@ class OptimizationInfo {
 
   // Toggles whether Range Analysis is used.
   bool rangeAnalysis_;
-
-  // Toggles whether loop unrolling is performed.
-  bool loopUnrolling_;
 
   // Toggles whether instruction reordering is performed.
   bool reordering_;
@@ -88,9 +108,9 @@ class OptimizationInfo {
 
   // The maximum total bytecode size of an inline call site. We use a lower
   // value if off-thread compilation is not available, to avoid stalling the
-  // active thread.
+  // main thread.
   uint32_t inlineMaxBytecodePerCallSiteHelperThread_;
-  uint32_t inlineMaxBytecodePerCallSiteActiveCooperatingThread_;
+  uint32_t inlineMaxBytecodePerCallSiteMainThread_;
 
   // The maximum value we allow for baselineScript->inlinedBytecodeLength_
   // when inlining.
@@ -117,20 +137,6 @@ class OptimizationInfo {
   // Actually it is only needed to make sure we don't blow out the stack.
   uint32_t smallFunctionMaxInlineDepth_;
 
-  // How many invocations or loop iterations are needed before functions
-  // are compiled.
-  uint32_t compilerWarmUpThreshold_;
-
-  // Default compiler warmup threshold, unless it is overridden.
-  static const uint32_t CompilerWarmupThreshold;
-
-  // How many invocations or loop iterations are needed before small functions
-  // are compiled.
-  uint32_t compilerSmallFunctionWarmUpThreshold_;
-
-  // Default small function compiler warmup threshold, unless it is overridden.
-  static const uint32_t CompilerSmallFunctionWarmupThreshold;
-
   // How many invocations or loop iterations are needed before calls
   // are inlined, as a fraction of compilerWarmUpThreshold.
   double inliningWarmUpThresholdFactor_;
@@ -140,9 +146,55 @@ class OptimizationInfo {
   // as a multiplication of inliningWarmUpThreshold.
   uint32_t inliningRecompileThresholdFactor_;
 
-  OptimizationInfo() {}
+  uint32_t baseCompilerWarmUpThreshold() const {
+    switch (level_) {
+      case OptimizationLevel::Normal:
+        return JitOptions.normalIonWarmUpThreshold;
+      case OptimizationLevel::Full:
+        if (!JitOptions.disableOptimizationLevels) {
+          return JitOptions.fullIonWarmUpThreshold;
+        }
+        // Use the 'normal' threshold so Ion uses a single optimization level,
+        // OptimizationLevel::Full.
+        return JitOptions.normalIonWarmUpThreshold;
+      case OptimizationLevel::DontCompile:
+      case OptimizationLevel::Wasm:
+      case OptimizationLevel::Count:
+        break;
+    }
+    MOZ_CRASH("Unexpected optimization level");
+  }
+
+ public:
+  constexpr OptimizationInfo()
+      : level_(OptimizationLevel::Normal),
+        eaa_(false),
+        ama_(false),
+        edgeCaseAnalysis_(false),
+        eliminateRedundantChecks_(false),
+        inlineInterpreted_(false),
+        inlineNative_(false),
+        gvn_(false),
+        licm_(false),
+        rangeAnalysis_(false),
+        reordering_(false),
+        autoTruncate_(false),
+        sincos_(false),
+        sink_(false),
+        registerAllocator_(RegisterAllocator_Backtracking),
+        inlineMaxBytecodePerCallSiteHelperThread_(0),
+        inlineMaxBytecodePerCallSiteMainThread_(0),
+        inlineMaxCalleeInlinedBytecodeLength_(0),
+        inlineMaxTotalBytecodeLength_(0),
+        inliningMaxCallerBytecodeLength_(0),
+        maxInlineDepth_(0),
+        scalarReplacement_(false),
+        smallFunctionMaxInlineDepth_(0),
+        inliningWarmUpThresholdFactor_(0.0),
+        inliningRecompileThresholdFactor_(0) {}
 
   void initNormalOptimizationInfo();
+  void initFullOptimizationInfo();
   void initWasmOptimizationInfo();
 
   OptimizationLevel level() const { return level_; }
@@ -158,9 +210,7 @@ class OptimizationInfo {
   uint32_t compilerWarmUpThreshold(JSScript* script,
                                    jsbytecode* pc = nullptr) const;
 
-  bool eagerSimdUnboxEnabled() const {
-    return eagerSimdUnbox_ && !JitOptions.disableEagerSimdUnbox;
-  }
+  uint32_t recompileWarmUpThreshold(JSScript* script, jsbytecode* pc) const;
 
   bool gvnEnabled() const { return gvn_ && !JitOptions.disableGvn; }
 
@@ -168,10 +218,6 @@ class OptimizationInfo {
 
   bool rangeAnalysisEnabled() const {
     return rangeAnalysis_ && !JitOptions.disableRangeAnalysis;
-  }
-
-  bool loopUnrollingEnabled() const {
-    return loopUnrolling_ && !JitOptions.disableLoopUnrolling;
   }
 
   bool instructionReorderingEnabled() const {
@@ -198,8 +244,6 @@ class OptimizationInfo {
     return eliminateRedundantChecks_;
   }
 
-  bool flowAliasAnalysisEnabled() const { return !JitOptions.disableFlowAA; }
-
   IonRegisterAllocator registerAllocator() const {
     return JitOptions.forcedRegisterAllocator.valueOr(registerAllocator_);
   }
@@ -219,7 +263,7 @@ class OptimizationInfo {
   uint32_t inlineMaxBytecodePerCallSite(bool offThread) const {
     return (offThread || !JitOptions.limitScriptSize)
                ? inlineMaxBytecodePerCallSiteHelperThread_
-               : inlineMaxBytecodePerCallSiteActiveCooperatingThread_;
+               : inlineMaxBytecodePerCallSiteMainThread_;
   }
 
   uint16_t inlineMaxCalleeInlinedBytecodeLength() const {
@@ -235,10 +279,7 @@ class OptimizationInfo {
   }
 
   uint32_t inliningWarmUpThreshold() const {
-    uint32_t compilerWarmUpThreshold =
-        JitOptions.forcedDefaultIonWarmUpThreshold.valueOr(
-            compilerWarmUpThreshold_);
-    return compilerWarmUpThreshold * inliningWarmUpThresholdFactor_;
+    return baseCompilerWarmUpThreshold() * inliningWarmUpThresholdFactor_;
   }
 
   uint32_t inliningRecompileThreshold() const {
@@ -266,7 +307,7 @@ class OptimizationLevelInfo {
                                    jsbytecode* pc = nullptr) const;
 };
 
-extern OptimizationLevelInfo IonOptimizations;
+extern const OptimizationLevelInfo IonOptimizations;
 
 }  // namespace jit
 }  // namespace js

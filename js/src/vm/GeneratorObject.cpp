@@ -1,14 +1,18 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
- * vim: set ts=8 sts=4 et sw=4 tw=99:
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+ * vim: set ts=8 sts=2 et sw=2 tw=80:
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "vm/GeneratorObject.h"
 
+#include "js/PropertySpec.h"
+#include "vm/AsyncFunction.h"
+#include "vm/AsyncIteration.h"
 #include "vm/JSObject.h"
 
 #include "vm/ArrayObject-inl.h"
+#include "vm/Debugger-inl.h"
 #include "vm/JSAtom-inl.h"
 #include "vm/JSScript-inl.h"
 #include "vm/NativeObject-inl.h"
@@ -16,43 +20,47 @@
 
 using namespace js;
 
-JSObject* GeneratorObject::create(JSContext* cx, AbstractFramePtr frame) {
-  MOZ_ASSERT(frame.script()->isGenerator() || frame.script()->isAsync());
+JSObject* AbstractGeneratorObject::create(JSContext* cx,
+                                          AbstractFramePtr frame) {
+  MOZ_ASSERT(frame.isGeneratorFrame());
   MOZ_ASSERT(frame.script()->nfixed() == 0);
+  MOZ_ASSERT(!frame.isConstructing());
 
-  Rooted<GlobalObject*> global(cx, cx->global());
+  RootedFunction fun(cx, frame.callee());
 
-  RootedValue pval(cx);
-  RootedObject fun(cx, frame.callee());
-  // FIXME: This would be faster if we could avoid doing a lookup to get
-  // the prototype for the instance.  Bug 906600.
-  if (!GetProperty(cx, fun, fun, cx->names().prototype, &pval)) return nullptr;
-  RootedObject proto(cx, pval.isObject() ? &pval.toObject() : nullptr);
-  if (!proto) {
-    proto = GlobalObject::getOrCreateGeneratorObjectPrototype(cx, global);
-    if (!proto) return nullptr;
+  Rooted<AbstractGeneratorObject*> genObj(cx);
+  if (!fun->isAsync()) {
+    genObj = GeneratorObject::create(cx, fun);
+  } else if (fun->isGenerator()) {
+    genObj = AsyncGeneratorObject::create(cx, fun);
+  } else {
+    genObj = AsyncFunctionGeneratorObject::create(cx, fun);
   }
-  RootedNativeObject obj(
-      cx, NewNativeObjectWithGivenProto(cx, &GeneratorObject::class_, proto));
-  if (!obj) return nullptr;
+  if (!genObj) {
+    return nullptr;
+  }
 
-  GeneratorObject* genObj = &obj->as<GeneratorObject>();
   genObj->setCallee(*frame.callee());
-  genObj->setNewTarget(frame.newTarget());
   genObj->setEnvironmentChain(*frame.environmentChain());
-  if (frame.script()->needsArgsObj()) genObj->setArgsObj(frame.argsObj());
+  if (frame.script()->needsArgsObj()) {
+    genObj->setArgsObj(frame.argsObj());
+  }
   genObj->clearExpressionStack();
 
-  return obj;
+  if (!Debugger::onNewGenerator(cx, frame, genObj)) {
+    return nullptr;
+  }
+
+  return genObj;
 }
 
-bool GeneratorObject::suspend(JSContext* cx, HandleObject obj,
-                              AbstractFramePtr frame, jsbytecode* pc, Value* vp,
-                              unsigned nvalues) {
+bool AbstractGeneratorObject::suspend(JSContext* cx, HandleObject obj,
+                                      AbstractFramePtr frame, jsbytecode* pc,
+                                      Value* vp, unsigned nvalues) {
   MOZ_ASSERT(*pc == JSOP_INITIALYIELD || *pc == JSOP_YIELD ||
              *pc == JSOP_AWAIT);
 
-  Rooted<GeneratorObject*> genObj(cx, &obj->as<GeneratorObject>());
+  auto genObj = obj.as<AbstractGeneratorObject>();
   MOZ_ASSERT(!genObj->hasExpressionStack() || genObj->isExpressionStackEmpty());
   MOZ_ASSERT_IF(*pc == JSOP_AWAIT, genObj->callee().isAsync());
   MOZ_ASSERT_IF(*pc == JSOP_YIELD, genObj->callee().isGenerator());
@@ -69,26 +77,52 @@ bool GeneratorObject::suspend(JSContext* cx, HandleObject obj,
                      nvalues);
           break;
         }
-        if (result == DenseElementResult::Failure) return false;
+        if (result == DenseElementResult::Failure) {
+          return false;
+        }
       }
 
       stack = NewDenseCopiedArray(cx, nvalues, vp);
-      if (!stack) return false;
+      if (!stack) {
+        return false;
+      }
     } while (false);
   }
 
-  uint32_t yieldAndAwaitIndex = GET_UINT24(pc);
-  genObj->setYieldAndAwaitIndex(yieldAndAwaitIndex);
+  genObj->setResumeIndex(pc);
   genObj->setEnvironmentChain(*frame.environmentChain());
-  if (stack) genObj->setExpressionStack(*stack);
+  if (stack) {
+    genObj->setExpressionStack(*stack);
+  }
 
   return true;
 }
 
-void GeneratorObject::finalSuspend(HandleObject obj) {
-  GeneratorObject* genObj = &obj->as<GeneratorObject>();
-  MOZ_ASSERT(genObj->isRunning() || genObj->isClosing());
+void AbstractGeneratorObject::finalSuspend(HandleObject obj) {
+  auto* genObj = &obj->as<AbstractGeneratorObject>();
+  MOZ_ASSERT(genObj->isRunning());
   genObj->setClosed();
+}
+
+AbstractGeneratorObject* js::GetGeneratorObjectForFrame(
+    JSContext* cx, AbstractFramePtr frame) {
+  cx->check(frame);
+  MOZ_ASSERT(frame.isGeneratorFrame());
+
+  if (!frame.hasInitialEnvironment()) {
+    return nullptr;
+  }
+
+  // The ".generator" binding is always present and always "aliased".
+  CallObject& callObj = frame.callObj();
+  Shape* shape = callObj.lookup(cx, cx->names().dotGenerator);
+  Value genValue = callObj.getSlot(shape->slot());
+
+  // If the `generator; setaliasedvar ".generator"; initialyield` bytecode
+  // sequence has not run yet, genValue is undefined.
+  return genValue.isObject()
+             ? &genValue.toObject().as<AbstractGeneratorObject>()
+             : nullptr;
 }
 
 void js::SetGeneratorClosed(JSContext* cx, AbstractFramePtr frame) {
@@ -96,44 +130,46 @@ void js::SetGeneratorClosed(JSContext* cx, AbstractFramePtr frame) {
 
   // Get the generator object stored on the scope chain and close it.
   Shape* shape = callObj.lookup(cx, cx->names().dotGenerator);
-  GeneratorObject& genObj =
-      callObj.getSlot(shape->slot()).toObject().as<GeneratorObject>();
+  auto& genObj =
+      callObj.getSlot(shape->slot()).toObject().as<AbstractGeneratorObject>();
   genObj.setClosed();
 }
 
 bool js::GeneratorThrowOrReturn(JSContext* cx, AbstractFramePtr frame,
-                                Handle<GeneratorObject*> genObj,
-                                HandleValue arg, uint32_t resumeKind) {
-  if (resumeKind == GeneratorObject::THROW) {
-    cx->setPendingException(arg);
-    genObj->setRunning();
+                                Handle<AbstractGeneratorObject*> genObj,
+                                HandleValue arg,
+                                GeneratorResumeKind resumeKind) {
+  MOZ_ASSERT(genObj->isRunning());
+  if (resumeKind == GeneratorResumeKind::Throw) {
+    cx->setPendingExceptionAndCaptureStack(arg);
   } else {
-    MOZ_ASSERT(resumeKind == GeneratorObject::RETURN);
+    MOZ_ASSERT(resumeKind == GeneratorResumeKind::Return);
 
-    MOZ_ASSERT(arg.isObject());
+    MOZ_ASSERT_IF(genObj->is<GeneratorObject>(), arg.isObject());
     frame.setReturnValue(arg);
 
-    cx->setPendingException(MagicValue(JS_GENERATOR_CLOSING));
-    genObj->setClosing();
+    RootedValue closing(cx, MagicValue(JS_GENERATOR_CLOSING));
+    cx->setPendingException(closing, nullptr);
   }
   return false;
 }
 
-bool GeneratorObject::resume(JSContext* cx, InterpreterActivation& activation,
-                             HandleObject obj, HandleValue arg,
-                             GeneratorObject::ResumeKind resumeKind) {
-  Rooted<GeneratorObject*> genObj(cx, &obj->as<GeneratorObject>());
+bool AbstractGeneratorObject::resume(JSContext* cx,
+                                     InterpreterActivation& activation,
+                                     Handle<AbstractGeneratorObject*> genObj,
+                                     HandleValue arg) {
   MOZ_ASSERT(genObj->isSuspended());
 
   RootedFunction callee(cx, &genObj->callee());
-  RootedValue newTarget(cx, genObj->newTarget());
   RootedObject envChain(cx, &genObj->environmentChain());
-  if (!activation.resumeGeneratorFrame(callee, newTarget, envChain))
+  if (!activation.resumeGeneratorFrame(callee, envChain)) {
     return false;
+  }
   activation.regs().fp()->setResumedGenerator();
 
-  if (genObj->hasArgsObj())
+  if (genObj->hasArgsObj()) {
     activation.regs().fp()->initArgsObj(genObj->argsObj());
+  }
 
   if (genObj->hasExpressionStack() && !genObj->isExpressionStackEmpty()) {
     uint32_t len = genObj->expressionStack().getDenseInitializedLength();
@@ -145,8 +181,7 @@ bool GeneratorObject::resume(JSContext* cx, InterpreterActivation& activation,
   }
 
   JSScript* script = callee->nonLazyScript();
-  uint32_t offset =
-      script->yieldAndAwaitOffsets()[genObj->yieldAndAwaitIndex()];
+  uint32_t offset = script->resumeOffsets()[genObj->resumeIndex()];
   activation.regs().pc = script->offsetToPC(offset);
 
   // Always push on a value, even if we are raising an exception. In the
@@ -156,19 +191,27 @@ bool GeneratorObject::resume(JSContext* cx, InterpreterActivation& activation,
   MOZ_ASSERT(activation.regs().spForStackDepth(activation.regs().stackDepth()));
   activation.regs().sp[-1] = arg;
 
-  switch (resumeKind) {
-    case NEXT:
-      genObj->setRunning();
-      return true;
+  genObj->setRunning();
+  return true;
+}
 
-    case THROW:
-    case RETURN:
-      return GeneratorThrowOrReturn(cx, activation.regs().fp(), genObj, arg,
-                                    resumeKind);
+GeneratorObject* GeneratorObject::create(JSContext* cx, HandleFunction fun) {
+  MOZ_ASSERT(fun->isGenerator() && !fun->isAsync());
 
-    default:
-      MOZ_CRASH("bad resumeKind");
+  // FIXME: This would be faster if we could avoid doing a lookup to get
+  // the prototype for the instance.  Bug 906600.
+  RootedValue pval(cx);
+  if (!GetProperty(cx, fun, fun, cx->names().prototype, &pval)) {
+    return nullptr;
   }
+  RootedObject proto(cx, pval.isObject() ? &pval.toObject() : nullptr);
+  if (!proto) {
+    proto = GlobalObject::getOrCreateGeneratorObjectPrototype(cx, cx->global());
+    if (!proto) {
+      return nullptr;
+    }
+  }
+  return NewObjectWithGivenProto<GeneratorObject>(cx, proto);
 }
 
 const Class GeneratorObject::class_ = {
@@ -183,22 +226,37 @@ JSObject* js::NewSingletonObjectWithFunctionPrototype(
     JSContext* cx, Handle<GlobalObject*> global) {
   RootedObject proto(cx,
                      GlobalObject::getOrCreateFunctionPrototype(cx, global));
-  if (!proto) return nullptr;
-  return NewObjectWithGivenProto<PlainObject>(cx, proto, SingletonObject);
+  if (!proto) {
+    return nullptr;
+  }
+  RootedObject obj(
+      cx, NewObjectWithGivenProto<PlainObject>(cx, proto, SingletonObject));
+  if (!obj) {
+    return nullptr;
+  }
+  if (!JSObject::setDelegate(cx, obj)) {
+    return nullptr;
+  }
+  return obj;
 }
 
-/* static */ bool GlobalObject::initGenerators(JSContext* cx,
-                                               Handle<GlobalObject*> global) {
-  if (global->getReservedSlot(GENERATOR_OBJECT_PROTO).isObject()) return true;
+/* static */
+bool GlobalObject::initGenerators(JSContext* cx, Handle<GlobalObject*> global) {
+  if (global->getReservedSlot(GENERATOR_OBJECT_PROTO).isObject()) {
+    return true;
+  }
 
   RootedObject iteratorProto(
       cx, GlobalObject::getOrCreateIteratorPrototype(cx, global));
-  if (!iteratorProto) return false;
+  if (!iteratorProto) {
+    return false;
+  }
 
-  RootedObject genObjectProto(
-      cx, GlobalObject::createBlankPrototypeInheriting(
-              cx, global, &PlainObject::class_, iteratorProto));
-  if (!genObjectProto) return false;
+  RootedObject genObjectProto(cx, GlobalObject::createBlankPrototypeInheriting(
+                                      cx, &PlainObject::class_, iteratorProto));
+  if (!genObjectProto) {
+    return false;
+  }
   if (!DefinePropertiesAndFunctions(cx, genObjectProto, nullptr,
                                     generator_methods) ||
       !DefineToStringTag(cx, genObjectProto, cx->names().Generator)) {
@@ -207,23 +265,28 @@ JSObject* js::NewSingletonObjectWithFunctionPrototype(
 
   RootedObject genFunctionProto(
       cx, NewSingletonObjectWithFunctionPrototype(cx, global));
-  if (!genFunctionProto || !JSObject::setDelegate(cx, genFunctionProto))
+  if (!genFunctionProto) {
     return false;
+  }
   if (!LinkConstructorAndPrototype(cx, genFunctionProto, genObjectProto,
                                    JSPROP_READONLY, JSPROP_READONLY) ||
       !DefineToStringTag(cx, genFunctionProto, cx->names().GeneratorFunction)) {
     return false;
   }
 
-  RootedValue function(cx, global->getConstructor(JSProto_Function));
-  if (!function.toObjectOrNull()) return false;
-  RootedObject proto(cx, &function.toObject());
-  RootedAtom name(cx, cx->names().GeneratorFunction);
+  RootedObject proto(
+      cx, GlobalObject::getOrCreateFunctionConstructor(cx, cx->global()));
+  if (!proto) {
+    return false;
+  }
+  HandlePropertyName name = cx->names().GeneratorFunction;
   RootedObject genFunction(
       cx, NewFunctionWithProto(cx, Generator, 1, JSFunction::NATIVE_CTOR,
                                nullptr, name, proto, gc::AllocKind::FUNCTION,
                                SingletonObject));
-  if (!genFunction) return false;
+  if (!genFunction) {
+    return false;
+  }
   if (!LinkConstructorAndPrototype(cx, genFunction, genFunctionProto,
                                    JSPROP_PERMANENT | JSPROP_READONLY,
                                    JSPROP_READONLY)) {
@@ -237,47 +300,40 @@ JSObject* js::NewSingletonObjectWithFunctionPrototype(
   return true;
 }
 
-MOZ_MUST_USE bool js::CheckGeneratorResumptionValue(JSContext* cx,
-                                                    HandleValue v) {
-  // yield/return value should be an Object.
-  if (!v.isObject()) return false;
-
-  JSObject* obj = &v.toObject();
-
-  // It should have `done` data property with boolean value.
-  Value doneVal;
-  if (!GetPropertyPure(cx, obj, NameToId(cx->names().done), &doneVal))
-    return false;
-  if (!doneVal.isBoolean()) return false;
-
-  // It should have `value` data property, but the type doesn't matter
-  JSObject* ignored;
-  PropertyResult prop;
-  if (!LookupPropertyPure(cx, obj, NameToId(cx->names().value), &ignored,
-                          &prop))
-    return false;
-  if (!prop) return false;
-  if (!prop.isNativeProperty()) return false;
-  if (!prop.shape()->hasDefaultGetter()) return false;
-
-  return true;
+bool AbstractGeneratorObject::isAfterYield() {
+  return isAfterYieldOrAwait(JSOP_YIELD);
 }
 
-bool GeneratorObject::isAfterYield() { return isAfterYieldOrAwait(JSOP_YIELD); }
+bool AbstractGeneratorObject::isAfterAwait() {
+  return isAfterYieldOrAwait(JSOP_AWAIT);
+}
 
-bool GeneratorObject::isAfterAwait() { return isAfterYieldOrAwait(JSOP_AWAIT); }
-
-bool GeneratorObject::isAfterYieldOrAwait(JSOp op) {
-  if (isClosed() || isClosing() || isRunning()) return false;
+bool AbstractGeneratorObject::isAfterYieldOrAwait(JSOp op) {
+  if (isClosed() || isRunning()) {
+    return false;
+  }
 
   JSScript* script = callee().nonLazyScript();
   jsbytecode* code = script->code();
-  uint32_t nextOffset = script->yieldAndAwaitOffsets()[yieldAndAwaitIndex()];
-  if (code[nextOffset] != JSOP_DEBUGAFTERYIELD) return false;
+  uint32_t nextOffset = script->resumeOffsets()[resumeIndex()];
+  if (code[nextOffset] != JSOP_AFTERYIELD) {
+    return false;
+  }
+
+  static_assert(JSOP_YIELD_LENGTH == JSOP_INITIALYIELD_LENGTH,
+                "JSOP_YIELD and JSOP_INITIALYIELD must have the same length");
+  static_assert(JSOP_YIELD_LENGTH == JSOP_AWAIT_LENGTH,
+                "JSOP_YIELD and JSOP_AWAIT must have the same length");
 
   uint32_t offset = nextOffset - JSOP_YIELD_LENGTH;
   MOZ_ASSERT(code[offset] == JSOP_INITIALYIELD || code[offset] == JSOP_YIELD ||
              code[offset] == JSOP_AWAIT);
 
   return code[offset] == op;
+}
+
+template <>
+bool JSObject::is<js::AbstractGeneratorObject>() const {
+  return is<GeneratorObject>() || is<AsyncFunctionGeneratorObject>() ||
+         is<AsyncGeneratorObject>();
 }

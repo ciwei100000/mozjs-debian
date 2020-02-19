@@ -1,5 +1,5 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
- * vim: set ts=8 sts=4 et sw=4 tw=99:
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+ * vim: set ts=8 sts=2 et sw=2 tw=80:
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -7,7 +7,6 @@
 #ifndef threading_ExclusiveData_h
 #define threading_ExclusiveData_h
 
-#include "mozilla/Alignment.h"
 #include "mozilla/Maybe.h"
 #include "mozilla/Move.h"
 #include "mozilla/OperatorNewExtensions.h"
@@ -18,6 +17,8 @@
 namespace js {
 
 /**
+ * [SMDOC] ExclusiveData API
+ *
  * A mutual exclusion lock class.
  *
  * `ExclusiveData` provides an RAII guard to automatically lock and unlock when
@@ -83,7 +84,7 @@ template <typename T>
 class ExclusiveData {
  protected:
   mutable Mutex lock_;
-  mutable mozilla::AlignedStorage2<T> value_;
+  mutable T value_;
 
   ExclusiveData(const ExclusiveData&) = delete;
   ExclusiveData& operator=(const ExclusiveData&) = delete;
@@ -97,34 +98,24 @@ class ExclusiveData {
    * value.
    */
   template <typename U>
-  explicit ExclusiveData(const MutexId& id, U&& u) : lock_(id) {
-    new (mozilla::KnownNotNull, value_.addr()) T(mozilla::Forward<U>(u));
-  }
+  explicit ExclusiveData(const MutexId& id, U&& u)
+      : lock_(id), value_(std::forward<U>(u)) {}
 
   /**
    * Create a new `ExclusiveData`, constructing the protected value in place.
    */
   template <typename... Args>
-  explicit ExclusiveData(const MutexId& id, Args&&... args) : lock_(id) {
-    new (mozilla::KnownNotNull, value_.addr())
-        T(mozilla::Forward<Args>(args)...);
-  }
+  explicit ExclusiveData(const MutexId& id, Args&&... args)
+      : lock_(id), value_(std::forward<Args>(args)...) {}
 
-  ~ExclusiveData() {
-    acquire();
-    value_.addr()->~T();
-    release();
-  }
-
-  ExclusiveData(ExclusiveData&& rhs) : lock_(mozilla::Move(rhs.lock)) {
+  ExclusiveData(ExclusiveData&& rhs)
+      : lock_(std::move(rhs.lock)), value_(std::move(rhs.value_)) {
     MOZ_ASSERT(&rhs != this, "self-move disallowed!");
-    new (mozilla::KnownNotNull, value_.addr())
-        T(mozilla::Move(*rhs.value_.addr()));
   }
 
   ExclusiveData& operator=(ExclusiveData&& rhs) {
     this->~ExclusiveData();
-    new (mozilla::KnownNotNull, this) ExclusiveData(mozilla::Move(rhs));
+    new (mozilla::KnownNotNull, this) ExclusiveData(std::move(rhs));
     return *this;
   }
 
@@ -154,13 +145,13 @@ class ExclusiveData {
 
     Guard& operator=(Guard&& rhs) {
       this->~Guard();
-      new (this) Guard(mozilla::Move(rhs));
+      new (this) Guard(std::move(rhs));
       return *this;
     }
 
     T& get() const {
       MOZ_ASSERT(parent_);
-      return *parent_->value_.addr();
+      return parent_->value_;
     }
 
     operator T&() const { return get(); }
@@ -172,7 +163,9 @@ class ExclusiveData {
     }
 
     ~Guard() {
-      if (parent_) parent_->release();
+      if (parent_) {
+        parent_->release();
+      }
     }
   };
 
@@ -191,11 +184,11 @@ class ExclusiveWaitableData : public ExclusiveData<T> {
  public:
   template <typename U>
   explicit ExclusiveWaitableData(const MutexId& id, U&& u)
-      : Base(id, mozilla::Forward<U>(u)) {}
+      : Base(id, std::forward<U>(u)) {}
 
   template <typename... Args>
   explicit ExclusiveWaitableData(const MutexId& id, Args&&... args)
-      : Base(id, mozilla::Forward<Args>(args)...) {}
+      : Base(id, std::forward<Args>(args)...) {}
 
   class MOZ_STACK_CLASS Guard : public ExclusiveData<T>::Guard {
     typedef typename ExclusiveData<T>::Guard Base;
@@ -203,11 +196,9 @@ class ExclusiveWaitableData : public ExclusiveData<T> {
    public:
     explicit Guard(const ExclusiveWaitableData& parent) : Base(parent) {}
 
-    Guard(Guard&& guard) : Base(mozilla::Move(guard)) {}
+    Guard(Guard&& guard) : Base(std::move(guard)) {}
 
-    Guard& operator=(Guard&& rhs) {
-      return Base::operator=(mozilla::Move(rhs));
-    }
+    Guard& operator=(Guard&& rhs) { return Base::operator=(std::move(rhs)); }
 
     void wait() {
       auto* parent = static_cast<const ExclusiveWaitableData*>(this->parent());

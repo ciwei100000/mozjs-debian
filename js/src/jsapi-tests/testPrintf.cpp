@@ -1,5 +1,5 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
- * vim: set ts=8 sts=4 et sw=4 tw=99:
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+ * vim: set ts=8 sts=2 et sw=2 tw=80:
  */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
@@ -15,7 +15,7 @@
 #include "jsapi-tests/tests.h"
 
 static bool MOZ_FORMAT_PRINTF(2, 3)
-    print_one(const char *expect, const char *fmt, ...) {
+    print_one(const char* expect, const char* fmt, ...) {
   va_list ap;
 
   va_start(ap, fmt);
@@ -25,7 +25,7 @@ static bool MOZ_FORMAT_PRINTF(2, 3)
   return output && !strcmp(output.get(), expect);
 }
 
-static const char *zero() { return nullptr; }
+static const char* zero() { return nullptr; }
 
 BEGIN_TEST(testPrintf) {
   CHECK(print_one("23", "%d", 23));
@@ -46,7 +46,7 @@ BEGIN_TEST(testPrintf) {
   CHECK(print_one("27270", "%zu", (size_t)27270));
   CHECK(print_one("hello", "he%so", "ll"));
   CHECK(print_one("(null)", "%s", ::zero()));
-  CHECK(print_one("0", "%p", (char *)0));
+  CHECK(print_one("0", "%p", (char*)0));
   CHECK(print_one("h", "%c", 'h'));
   CHECK(print_one("1.500000", "%f", 1.5f));
   CHECK(print_one("1.5", "%g", 1.5));

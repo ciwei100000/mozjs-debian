@@ -1,5 +1,5 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
- * vim: set ts=8 sts=4 et sw=4 tw=99:
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+ * vim: set ts=8 sts=2 et sw=2 tw=80:
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -14,6 +14,7 @@ namespace js {
 namespace jit {
 
 struct BaselineDebugModeOSRInfo;
+class ICEntry;
 
 // The stack looks like this, fp is the frame pointer:
 //
@@ -30,6 +31,9 @@ class BaselineFrame {
     // The frame has a valid return value. See also InterpreterFrame::HAS_RVAL.
     HAS_RVAL = 1 << 0,
 
+    // The frame is running in the Baseline interpreter instead of JIT.
+    RUNNING_IN_INTERPRETER = 1 << 1,
+
     // An initial environment has been pushed on the environment chain for
     // function frames that need a CallObject or eval frames that need a
     // VarEnvironmentObject.
@@ -43,7 +47,7 @@ class BaselineFrame {
 
     // Frame has execution observed by a Debugger.
     //
-    // See comment above 'isDebuggee' in vm/JSCompartment.h for explanation
+    // See comment above 'isDebuggee' in vm/Realm.h for explanation
     // of invariants of debuggee compartments, scripts, and frames.
     DEBUGGEE = 1 << 6,
 
@@ -57,14 +61,17 @@ class BaselineFrame {
     HAS_DEBUG_MODE_OSR_INFO = 1 << 10,
 
     // This flag is intended for use whenever the frame is settled on a
-    // native code address without a corresponding ICEntry. In this case,
-    // the frame contains an explicit bytecode offset for frame iterators.
+    // native code address without a corresponding RetAddrEntry. In this
+    // case, the frame contains an explicit bytecode offset for frame
+    // iterators.
     //
     // There can also be an override pc if the frame has had its
     // environment chain unwound to a pc during exception handling that is
     // different from its current pc.
     //
-    // This flag should never be set when we're executing JIT code.
+    // This flag should never be set on the top frame while we're
+    // executing JIT code. In debug builds, it is checked before and
+    // after VM calls.
     HAS_OVERRIDE_PC = 1 << 11,
 
     // If set, we're handling an exception for this frame. This is set for
@@ -74,9 +81,16 @@ class BaselineFrame {
   };
 
  protected:  // Silence Clang warning about unused private fields.
+  // The fields below are only valid if RUNNING_IN_INTERPRETER.
+  JSScript* interpreterScript_;
+  jsbytecode* interpreterPC_;
+  ICEntry* interpreterICEntry_;
+
+  JSObject* envChain_;        // Environment chain (always initialized).
+  ArgumentsObject* argsObj_;  // If HAS_ARGS_OBJ, the arguments object.
+
   // We need to split the Value into 2 fields of 32 bits, otherwise the C++
   // compiler may add some padding between the fields.
-
   union {
     struct {
       uint32_t loScratchValue_;
@@ -84,13 +98,16 @@ class BaselineFrame {
     };
     BaselineDebugModeOSRInfo* debugModeOSRInfo_;
   };
+
+  uint32_t flags_;
+  uint32_t frameSize_;
   uint32_t loReturnValue_;  // If HAS_RVAL, the frame's return value.
   uint32_t hiReturnValue_;
-  uint32_t frameSize_;
-  JSObject* envChain_;        // Environment chain (always initialized).
-  ArgumentsObject* argsObj_;  // If HAS_ARGS_OBJ, the arguments object.
-  uint32_t overrideOffset_;   // If HAS_OVERRIDE_PC, the bytecode offset.
-  uint32_t flags_;
+  uint32_t overrideOffset_;  // If HAS_OVERRIDE_PC, the bytecode offset.
+#if JS_BITS_PER_WORD == 32
+  // Ensure frame is 8-byte aligned, see static_assert below.
+  uint32_t padding_;
+#endif
 
  public:
   // Distance between the frame pointer and the frame header (return address).
@@ -194,10 +211,13 @@ class BaselineFrame {
 
  public:
   Value newTarget() const {
-    if (isEvalFrame()) return *evalNewTargetAddress();
+    if (isEvalFrame()) {
+      return *evalNewTargetAddress();
+    }
     MOZ_ASSERT(isFunctionFrame());
-    if (callee()->isArrow())
+    if (callee()->isArrow()) {
       return callee()->getExtendedSlot(FunctionExtended::ARROW_NEWTARGET_SLOT);
+    }
     if (isConstructing()) {
       return *(Value*)(reinterpret_cast<const uint8_t*>(this) +
                        BaselineFrame::Size() +
@@ -206,9 +226,33 @@ class BaselineFrame {
     return UndefinedValue();
   }
 
+  void prepareForBaselineInterpreterToJitOSR() {
+    // Clearing the RUNNING_IN_INTERPRETER flag is sufficient, but we also null
+    // out the interpreter fields to ensure we don't use stale values.
+    flags_ &= ~RUNNING_IN_INTERPRETER;
+    interpreterScript_ = nullptr;
+    interpreterPC_ = nullptr;
+    interpreterICEntry_ = nullptr;
+  }
+
+  bool runningInInterpreter() const { return flags_ & RUNNING_IN_INTERPRETER; }
+
+  JSScript* interpreterScript() const {
+    MOZ_ASSERT(runningInInterpreter());
+    return interpreterScript_;
+  }
+
+  jsbytecode* interpreterPC() const {
+    MOZ_ASSERT(runningInInterpreter());
+    return interpreterPC_;
+  }
+  void setInterpreterPC(jsbytecode* pc);
+
   bool hasReturnValue() const { return flags_ & HAS_RVAL; }
   MutableHandleValue returnValue() {
-    if (!hasReturnValue()) addressOfReturnValue()->setUndefined();
+    if (!hasReturnValue()) {
+      addressOfReturnValue()->setUndefined();
+    }
     return MutableHandleValue::fromMarkedLocation(addressOfReturnValue());
   }
   void setReturnValue(const Value& v) {
@@ -271,7 +315,9 @@ class BaselineFrame {
   }
 
   BaselineDebugModeOSRInfo* getDebugModeOSRInfo() {
-    if (flags_ & HAS_DEBUG_MODE_OSR_INFO) return debugModeOSRInfo();
+    if (flags_ & HAS_DEBUG_MODE_OSR_INFO) {
+      return debugModeOSRInfo();
+    }
     return nullptr;
   }
 
@@ -291,7 +337,9 @@ class BaselineFrame {
   }
 
   jsbytecode* maybeOverridePc() const {
-    if (hasOverridePc()) return overridePc();
+    if (hasOverridePc()) {
+      return overridePc();
+    }
     return nullptr;
   }
 
@@ -365,14 +413,24 @@ class BaselineFrame {
   static int reverseOffsetOfReturnValue() {
     return -int(Size()) + offsetof(BaselineFrame, loReturnValue_);
   }
+  static int reverseOffsetOfInterpreterScript() {
+    return -int(Size()) + offsetof(BaselineFrame, interpreterScript_);
+  }
+  static int reverseOffsetOfInterpreterPC() {
+    return -int(Size()) + offsetof(BaselineFrame, interpreterPC_);
+  }
+  static int reverseOffsetOfInterpreterICEntry() {
+    return -int(Size()) + offsetof(BaselineFrame, interpreterICEntry_);
+  }
   static int reverseOffsetOfLocal(size_t index) {
     return -int(Size()) - (index + 1) * sizeof(Value);
   }
 };
 
 // Ensure the frame is 8-byte aligned (required on ARM).
-JS_STATIC_ASSERT(((sizeof(BaselineFrame) + BaselineFrame::FramePointerOffset) %
-                  8) == 0);
+static_assert(((sizeof(BaselineFrame) + BaselineFrame::FramePointerOffset) %
+               8) == 0,
+              "frame (including frame pointer) must be 8-byte aligned");
 
 }  // namespace jit
 }  // namespace js

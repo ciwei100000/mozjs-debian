@@ -1,5 +1,5 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
- * vim: set ts=8 sts=4 et sw=4 tw=99:
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+ * vim: set ts=8 sts=2 et sw=2 tw=80:
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -155,26 +155,24 @@ class FloatRegister : public FloatRegisterMIPSShared {
   }
   bool aliases(const FloatRegister& other) { return reg_ == other.reg_; }
   uint32_t numAliased() const { return 2; }
-  void aliased(uint32_t aliasIdx, FloatRegister* ret) {
+  FloatRegister aliased(uint32_t aliasIdx) {
     if (aliasIdx == 0) {
-      *ret = *this;
-      return;
+      return *this;
     }
     MOZ_ASSERT(aliasIdx == 1);
-    if (isDouble())
-      *ret = singleOverlay();
-    else
-      *ret = doubleOverlay();
+    if (isDouble()) {
+      return singleOverlay();
+    }
+    return doubleOverlay();
   }
   uint32_t numAlignedAliased() const { return 2; }
-  void alignedAliased(uint32_t aliasIdx, FloatRegister* ret) {
+  FloatRegister alignedAliased(uint32_t aliasIdx) {
     MOZ_ASSERT(isDouble());
     if (aliasIdx == 0) {
-      *ret = *this;
-      return;
+      return *this;
     }
     MOZ_ASSERT(aliasIdx == 1);
-    *ret = singleOverlay();
+    return singleOverlay();
   }
 
   SetType alignedOrDominatedAliasedSet() const { return Codes::Spread << reg_; }

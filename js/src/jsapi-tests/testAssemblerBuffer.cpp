@@ -50,7 +50,6 @@ BEGIN_TEST(testAssemblerBuffer_AssemblerBuffer) {
   CHECK_EQUAL(ab.size(), 0u);
   CHECK_EQUAL(ab.nextOffset().getOffset(), 0);
   CHECK(!ab.oom());
-  CHECK(!ab.bail());
 
   BufferOffset off1 = ab.putInt(1000017);
   CHECK_EQUAL(off1.getOffset(), 0);
@@ -317,7 +316,6 @@ BEGIN_TEST(testAssemblerBuffer_AssemblerBufferWithConstantPools) {
   CHECK_EQUAL(ab.size(), 0u);
   CHECK_EQUAL(ab.nextOffset().getOffset(), 0);
   CHECK(!ab.oom());
-  CHECK(!ab.bail());
 
   // Each slice holds 5 instructions. Trigger a constant pool inside the slice.
   uint32_t poolLoad[] = {0xc0cc0000};
@@ -518,7 +516,7 @@ END_TEST(testAssemblerBuffer_AssemblerBufferWithConstantPools_ShortBranch)
 // Test that everything is put together correctly in the ARM64 assembler.
 #if defined(JS_CODEGEN_ARM64)
 
-#include "jit/MacroAssembler-inl.h"
+#  include "jit/MacroAssembler-inl.h"
 
 BEGIN_TEST(testAssemblerBuffer_ARM64) {
   using namespace js::jit;
@@ -526,8 +524,7 @@ BEGIN_TEST(testAssemblerBuffer_ARM64) {
   js::LifoAlloc lifo(4096);
   TempAllocator alloc(&lifo);
   JitContext jc(cx, &alloc);
-  cx->runtime()->getJitRuntime(cx);
-  MacroAssembler masm;
+  StackMacroAssembler masm;
 
   // Branches to an unbound label.
   Label lab1;
@@ -550,7 +547,9 @@ BEGIN_TEST(testAssemblerBuffer_ARM64) {
   masm.bind(&lab2a);
   masm.B(&lab2b);
   // Generate 1,100,000 bytes of NOPs.
-  for (unsigned n = 0; n < 1100000; n += 4) masm.Nop();
+  for (unsigned n = 0; n < 1100000; n += 4) {
+    masm.Nop();
+  }
   masm.branch(Assembler::LessThan, &lab2b);
   masm.bind(&lab2b);
   CHECK_EQUAL(
@@ -565,7 +564,9 @@ BEGIN_TEST(testAssemblerBuffer_ARM64) {
   Label lab3b;
   masm.bind(&lab3a);
   masm.branch(Assembler::LessThan, &lab3b);
-  for (unsigned n = 0; n < 1100000; n += 4) masm.Nop();
+  for (unsigned n = 0; n < 1100000; n += 4) {
+    masm.Nop();
+  }
   masm.bind(&lab3b);
   masm.B(&lab3a);
   Instruction* bcond3 = masm.getInstructionAt(BufferOffset(lab3a.offset()));

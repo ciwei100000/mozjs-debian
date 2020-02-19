@@ -1,5 +1,5 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
- * vim: set ts=8 sts=4 et sw=4 tw=99:
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+ * vim: set ts=8 sts=2 et sw=2 tw=80:
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -11,11 +11,15 @@
 #include "mozilla/TimeStamp.h"
 
 #include "threading/ConditionVariable.h"
+#include "threading/ProtectedData.h"  // js::ThreadData
 #include "vm/JSObject.h"
 #include "vm/MutexIDs.h"
 #include "vm/NativeObject.h"
 
 namespace js {
+
+class GlobalObject;
+class SharedArrayRawBuffer;
 
 class AtomicsObject : public NativeObject {
  public:
@@ -37,7 +41,7 @@ MOZ_MUST_USE bool atomics_or(JSContext* cx, unsigned argc, Value* vp);
 MOZ_MUST_USE bool atomics_xor(JSContext* cx, unsigned argc, Value* vp);
 MOZ_MUST_USE bool atomics_isLockFree(JSContext* cx, unsigned argc, Value* vp);
 MOZ_MUST_USE bool atomics_wait(JSContext* cx, unsigned argc, Value* vp);
-MOZ_MUST_USE bool atomics_wake(JSContext* cx, unsigned argc, Value* vp);
+MOZ_MUST_USE bool atomics_notify(JSContext* cx, unsigned argc, Value* vp);
 
 class FutexThread {
   friend class AutoLockFutexAPI;
@@ -53,10 +57,10 @@ class FutexThread {
   MOZ_MUST_USE bool initInstance();
   void destroyInstance();
 
-  // Parameters to wake().
-  enum WakeReason {
-    WakeExplicit,       // Being asked to wake up by another thread
-    WakeForJSInterrupt  // Interrupt requested
+  // Parameters to notify().
+  enum NotifyReason {
+    NotifyExplicit,       // Being asked to wake up by another thread
+    NotifyForJSInterrupt  // Interrupt requested
   };
 
   // Result codes from wait() and atomics_wait_impl().
@@ -75,30 +79,28 @@ class FutexThread {
   // times allowed; specify mozilla::Nothing() for an indefinite
   // wait.
   //
-  // wait() will not wake up spuriously.  It will return true and
-  // set *result to a return code appropriate for
-  // Atomics.wait() on success, and return false on error.
+  // wait() will not wake up spuriously.
   MOZ_MUST_USE WaitResult
   wait(JSContext* cx, js::UniqueLock<js::Mutex>& locked,
        const mozilla::Maybe<mozilla::TimeDuration>& timeout);
 
-  // Wake the thread this is associated with.
+  // Notify the thread this is associated with.
   //
   // The futex lock must be held around this call.  (The sleeping
-  // thread will not wake up until the caller of Atomics.wake()
+  // thread will not wake up until the caller of Atomics.notify()
   // releases the lock.)
   //
   // If the thread is not waiting then this method does nothing.
   //
   // If the thread is waiting in a call to wait() and the
-  // reason is WakeExplicit then the wait() call will return
+  // reason is NotifyExplicit then the wait() call will return
   // with Woken.
   //
   // If the thread is waiting in a call to wait() and the
-  // reason is WakeForJSInterrupt then the wait() will return
+  // reason is NotifyForJSInterrupt then the wait() will return
   // with WaitingNotifiedForInterrupt; in the latter case the caller
   // of wait() must handle the interrupt.
-  void wake(WakeReason reason);
+  void notify(NotifyReason reason);
 
   bool isWaiting();
 
@@ -117,7 +119,7 @@ class FutexThread {
                                   //   interrupt handler
     WaitingInterrupted,           // We are waiting, but have been interrupted
                                   //   and are running the interrupt handler
-    Woken                         // Woken by a script call to Atomics.wake
+    Woken                         // Woken by a script call to Atomics.notify
   };
 
   // Condition variable that this runtime will wait on.
@@ -131,13 +133,15 @@ class FutexThread {
   // Shared futex lock for all runtimes.  We can perhaps do better,
   // but any lock will need to be per-domain (consider SharedWorker)
   // or coarser.
-  static mozilla::Atomic<js::Mutex*> lock_;
+  static mozilla::Atomic<js::Mutex*, mozilla::SequentiallyConsistent,
+                         mozilla::recordreplay::Behavior::DontPreserve>
+      lock_;
 
   // A flag that controls whether waiting is allowed.
-  ThreadLocalData<bool> canWait_;
+  ThreadData<bool> canWait_;
 };
 
-JSObject* InitAtomicsClass(JSContext* cx, HandleObject obj);
+JSObject* InitAtomicsClass(JSContext* cx, Handle<GlobalObject*> global);
 
 // Go to sleep if the int32_t value at the given address equals `value`.
 MOZ_MUST_USE FutexThread::WaitResult atomics_wait_impl(
@@ -149,12 +153,12 @@ MOZ_MUST_USE FutexThread::WaitResult atomics_wait_impl(
     JSContext* cx, SharedArrayRawBuffer* sarb, uint32_t byteOffset,
     int64_t value, const mozilla::Maybe<mozilla::TimeDuration>& timeout);
 
-// Wake some waiters on the given address.  If `count` is negative then wake
+// Notify some waiters on the given address.  If `count` is negative then notify
 // all.  The return value is nonnegative and is the number of waiters woken.  If
 // the number of waiters woken exceeds INT64_MAX then this never returns.  If
 // `count` is nonnegative then the return value is never greater than `count`.
-MOZ_MUST_USE int64_t atomics_wake_impl(SharedArrayRawBuffer* sarb,
-                                       uint32_t byteOffset, int64_t count);
+MOZ_MUST_USE int64_t atomics_notify_impl(SharedArrayRawBuffer* sarb,
+                                         uint32_t byteOffset, int64_t count);
 
 } /* namespace js */
 

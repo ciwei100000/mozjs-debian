@@ -1,9 +1,6 @@
-// |jit-test| error: out of memory; slow;
+// |jit-test| slow; skip-if: !('oomTest' in this); allow-oom
 
-if (!('oomTest' in this))
-    throw new Error("out of memory");
-
-var g = newGlobal();
+var g = newGlobal({newCompartment: true});
 var dbg = new Debugger(g);
 dbg.onNewScript = function (s) {
   log += dbg.findScripts({ source: s.source }).length;

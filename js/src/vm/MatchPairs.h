@@ -1,5 +1,5 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
- * vim: set ts=8 sts=4 et sw=4 tw=99:
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+ * vim: set ts=8 sts=2 et sw=2 tw=80:
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -21,11 +21,13 @@
 
 namespace js {
 
-struct MatchPair {
+struct MatchPair final {
   int32_t start;
   int32_t limit;
 
-  MatchPair() : start(-1), limit(-1) {}
+  static constexpr int32_t NoMatch = -1;
+
+  MatchPair() : start(NoMatch), limit(NoMatch) {}
 
   MatchPair(int32_t start, int32_t limit) : start(start), limit(limit) {}
 
@@ -33,18 +35,12 @@ struct MatchPair {
     MOZ_ASSERT(!isUndefined());
     return limit - start;
   }
-  bool isEmpty() const { return length() == 0; }
   bool isUndefined() const { return start < 0; }
-
-  void displace(size_t amount) {
-    start += (start < 0) ? 0 : amount;
-    limit += (limit < 0) ? 0 : amount;
-  }
 
   inline bool check() const {
     MOZ_ASSERT(limit >= start);
-    MOZ_ASSERT_IF(start < 0, start == -1);
-    MOZ_ASSERT_IF(limit < 0, limit == -1);
+    MOZ_ASSERT_IF(start < 0, start == NoMatch);
+    MOZ_ASSERT_IF(limit < 0, limit == NoMatch);
     return true;
   }
 };
@@ -60,7 +56,7 @@ class MatchPairs {
   MatchPair* pairs_;
 
  protected:
-  /* Not used directly: use ScopedMatchPairs or VectorMatchPairs. */
+  /* Not used directly: use VectorMatchPairs. */
   MatchPairs() : pairCount_(0), pairs_(nullptr) {}
 
  protected:
@@ -75,7 +71,9 @@ class MatchPairs {
     for (size_t i = 0; i < pairCount_; i++) {
       const MatchPair& p = (*this)[i];
       MOZ_ASSERT(p.check());
-      if (p.isUndefined()) continue;
+      if (p.isUndefined()) {
+        continue;
+      }
       MOZ_ASSERT(size_t(p.limit) <= inputLength);
     }
 #endif
@@ -88,7 +86,6 @@ class MatchPairs {
     MOZ_ASSERT(pairCount_ > 0);
     return pairCount_;
   }
-  size_t parenCount() const { return pairCount_ - 1; }
 
   static size_t offsetOfPairs() { return offsetof(MatchPairs, pairs_); }
   static size_t offsetOfPairCount() { return offsetof(MatchPairs, pairCount_); }

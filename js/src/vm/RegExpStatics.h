@@ -1,5 +1,5 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
- * vim: set ts=8 sts=4 et sw=4 tw=99:
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+ * vim: set ts=8 sts=2 et sw=2 tw=80:
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -29,7 +29,7 @@ class RegExpStatics {
    * a different compartment via evalcx().
    */
   HeapPtr<JSAtom*> lazySource;
-  RegExpFlag lazyFlags;
+  JS::RegExpFlags lazyFlags;
   size_t lazyIndex;
 
   /* The latest RegExp input, set before execution. */
@@ -129,7 +129,9 @@ inline bool RegExpStatics::createDependent(JSContext* cx, size_t start,
   MOZ_ASSERT(start <= end);
   MOZ_ASSERT(end <= matchesInput->length());
   JSString* str = NewDependentString(cx, matchesInput, start, end - start);
-  if (!str) return false;
+  if (!str) {
+    return false;
+  }
   out.setString(str);
   return true;
 }
@@ -159,13 +161,17 @@ inline bool RegExpStatics::makeMatch(JSContext* cx, size_t pairNum,
 
 inline bool RegExpStatics::createLastMatch(JSContext* cx,
                                            MutableHandleValue out) {
-  if (!executeLazy(cx)) return false;
+  if (!executeLazy(cx)) {
+    return false;
+  }
   return makeMatch(cx, 0, out);
 }
 
 inline bool RegExpStatics::createLastParen(JSContext* cx,
                                            MutableHandleValue out) {
-  if (!executeLazy(cx)) return false;
+  if (!executeLazy(cx)) {
+    return false;
+  }
 
   if (matches.empty() || matches.pairCount() == 1) {
     out.setString(cx->runtime()->emptyString);
@@ -184,7 +190,9 @@ inline bool RegExpStatics::createLastParen(JSContext* cx,
 inline bool RegExpStatics::createParen(JSContext* cx, size_t pairNum,
                                        MutableHandleValue out) {
   MOZ_ASSERT(pairNum >= 1);
-  if (!executeLazy(cx)) return false;
+  if (!executeLazy(cx)) {
+    return false;
+  }
 
   if (matches.empty() || pairNum >= matches.pairCount()) {
     out.setString(cx->runtime()->emptyString);
@@ -195,7 +203,9 @@ inline bool RegExpStatics::createParen(JSContext* cx, size_t pairNum,
 
 inline bool RegExpStatics::createLeftContext(JSContext* cx,
                                              MutableHandleValue out) {
-  if (!executeLazy(cx)) return false;
+  if (!executeLazy(cx)) {
+    return false;
+  }
 
   if (matches.empty()) {
     out.setString(cx->runtime()->emptyString);
@@ -210,7 +220,9 @@ inline bool RegExpStatics::createLeftContext(JSContext* cx,
 
 inline bool RegExpStatics::createRightContext(JSContext* cx,
                                               MutableHandleValue out) {
-  if (!executeLazy(cx)) return false;
+  if (!executeLazy(cx)) {
+    return false;
+  }
 
   if (matches.empty()) {
     out.setString(cx->runtime()->emptyString);
@@ -262,7 +274,7 @@ inline void RegExpStatics::clear() {
   matches.forgetArray();
   matchesInput = nullptr;
   lazySource = nullptr;
-  lazyFlags = RegExpFlag(0);
+  lazyFlags = JS::RegExpFlag::NoFlags;
   lazyIndex = size_t(-1);
   pendingInput = nullptr;
   pendingLazyEvaluation = false;
@@ -296,7 +308,9 @@ inline void RegExpStatics::checkInvariants() {
 
   /* Present pairs must be valid. */
   for (size_t i = 0; i < matches.pairCount(); i++) {
-    if (matches[i].isUndefined()) continue;
+    if (matches[i].isUndefined()) {
+      continue;
+    }
     const MatchPair& pair = matches[i];
     MOZ_ASSERT(mpiLen >= size_t(pair.limit) && pair.limit >= pair.start &&
                pair.start >= 0);

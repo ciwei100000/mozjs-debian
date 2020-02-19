@@ -1,5 +1,5 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
- * vim: set ts=8 sts=4 et sw=4 tw=99:
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+ * vim: set ts=8 sts=2 et sw=2 tw=80:
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -23,9 +23,8 @@ bool OpaqueCrossCompartmentWrapper::defineProperty(
   return result.succeed();
 }
 
-bool OpaqueCrossCompartmentWrapper::ownPropertyKeys(JSContext* cx,
-                                                    HandleObject wrapper,
-                                                    AutoIdVector& props) const {
+bool OpaqueCrossCompartmentWrapper::ownPropertyKeys(
+    JSContext* cx, HandleObject wrapper, MutableHandleIdVector props) const {
   return true;
 }
 
@@ -35,9 +34,9 @@ bool OpaqueCrossCompartmentWrapper::delete_(JSContext* cx, HandleObject wrapper,
   return result.succeed();
 }
 
-JSObject* OpaqueCrossCompartmentWrapper::enumerate(JSContext* cx,
-                                                   HandleObject wrapper) const {
-  return BaseProxyHandler::enumerate(cx, wrapper);
+bool OpaqueCrossCompartmentWrapper::enumerate(
+    JSContext* cx, HandleObject proxy, MutableHandleIdVector props) const {
+  return BaseProxyHandler::enumerate(cx, proxy, props);
 }
 
 bool OpaqueCrossCompartmentWrapper::getPrototype(
@@ -111,19 +110,13 @@ bool OpaqueCrossCompartmentWrapper::construct(JSContext* cx,
   return false;
 }
 
-bool OpaqueCrossCompartmentWrapper::getPropertyDescriptor(
-    JSContext* cx, HandleObject wrapper, HandleId id,
-    MutableHandle<PropertyDescriptor> desc) const {
-  return BaseProxyHandler::getPropertyDescriptor(cx, wrapper, id, desc);
-}
-
 bool OpaqueCrossCompartmentWrapper::hasOwn(JSContext* cx, HandleObject wrapper,
                                            HandleId id, bool* bp) const {
   return BaseProxyHandler::hasOwn(cx, wrapper, id, bp);
 }
 
 bool OpaqueCrossCompartmentWrapper::getOwnEnumerablePropertyKeys(
-    JSContext* cx, HandleObject wrapper, AutoIdVector& props) const {
+    JSContext* cx, HandleObject wrapper, MutableHandleIdVector props) const {
   return BaseProxyHandler::getOwnEnumerablePropertyKeys(cx, wrapper, props);
 }
 
@@ -137,6 +130,14 @@ bool OpaqueCrossCompartmentWrapper::getBuiltinClass(JSContext* cx,
 bool OpaqueCrossCompartmentWrapper::isArray(JSContext* cx, HandleObject obj,
                                             JS::IsArrayAnswer* answer) const {
   *answer = JS::IsArrayAnswer::NotArray;
+  return true;
+}
+
+bool OpaqueCrossCompartmentWrapper::hasInstance(JSContext* cx,
+                                                HandleObject wrapper,
+                                                MutableHandleValue v,
+                                                bool* bp) const {
+  *bp = false;
   return true;
 }
 

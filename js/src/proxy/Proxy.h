@@ -1,5 +1,5 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
- * vim: set ts=8 sts=4 et sw=4 tw=99:
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+ * vim: set ts=8 sts=2 et sw=2 tw=80:
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -12,6 +12,8 @@
 #include "js/Class.h"
 
 namespace js {
+
+class GlobalObject;
 
 /*
  * Dispatch point for handlers that executes the appropriate C++ or scripted
@@ -31,10 +33,11 @@ class Proxy {
                              Handle<JS::PropertyDescriptor> desc,
                              ObjectOpResult& result);
   static bool ownPropertyKeys(JSContext* cx, HandleObject proxy,
-                              AutoIdVector& props);
+                              MutableHandleIdVector props);
   static bool delete_(JSContext* cx, HandleObject proxy, HandleId id,
                       ObjectOpResult& result);
-  static JSObject* enumerate(JSContext* cx, HandleObject proxy);
+  static bool enumerate(JSContext* cx, HandleObject proxy,
+                        MutableHandleIdVector props);
   static bool isExtensible(JSContext* cx, HandleObject proxy, bool* extensible);
   static bool preventExtensions(JSContext* cx, HandleObject proxy,
                                 ObjectOpResult& result);
@@ -63,12 +66,9 @@ class Proxy {
                         const CallArgs& args);
 
   /* SpiderMonkey extensions. */
-  static bool getPropertyDescriptor(JSContext* cx, HandleObject proxy,
-                                    HandleId id,
-                                    MutableHandle<JS::PropertyDescriptor> desc);
   static bool hasOwn(JSContext* cx, HandleObject proxy, HandleId id, bool* bp);
   static bool getOwnEnumerablePropertyKeys(JSContext* cx, HandleObject proxy,
-                                           AutoIdVector& props);
+                                           MutableHandleIdVector props);
   static bool nativeCall(JSContext* cx, IsAcceptableThis test, NativeImpl impl,
                          const CallArgs& args);
   static bool hasInstance(JSContext* cx, HandleObject proxy,
@@ -89,8 +89,6 @@ class Proxy {
   static void trace(JSTracer* trc, JSObject* obj);
 };
 
-bool proxy_Call(JSContext* cx, unsigned argc, Value* vp);
-bool proxy_Construct(JSContext* cx, unsigned argc, Value* vp);
 size_t proxy_ObjectMoved(JSObject* obj, JSObject* old);
 
 // These functions are used by JIT code
@@ -112,6 +110,8 @@ bool ProxySetProperty(JSContext* cx, HandleObject proxy, HandleId id,
 
 bool ProxySetPropertyByValue(JSContext* cx, HandleObject proxy,
                              HandleValue idVal, HandleValue val, bool strict);
+
+extern JSObject* InitProxyClass(JSContext* cx, Handle<GlobalObject*> global);
 
 } /* namespace js */
 

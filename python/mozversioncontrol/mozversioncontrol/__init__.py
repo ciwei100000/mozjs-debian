@@ -9,8 +9,9 @@ import errno
 import os
 import re
 import subprocess
-import which
+import sys
 
+from distutils.spawn import find_executable
 from distutils.version import LooseVersion
 
 
@@ -48,22 +49,12 @@ def get_tool_path(tool):
     if os.path.isabs(tool) and os.path.exists(tool):
         return tool
 
-    # We use subprocess in places, which expects a Win32 executable or
-    # batch script. On some versions of MozillaBuild, we have "hg.exe",
-    # "hg.bat," and "hg" (a Python script). "which" will happily return the
-    # Python script, which will cause subprocess to choke. Explicitly favor
-    # the Windows version over the plain script.
-    try:
-        return which.which(tool + '.exe')
-    except which.WhichError:
-        try:
-            return which.which(tool)
-        except which.WhichError:
-            pass
-
-    raise MissingVCSTool('Unable to obtain %s path. Try running '
-                         '|mach bootstrap| to ensure your environment is up to '
-                         'date.' % tool)
+    path = find_executable(tool)
+    if not path:
+        raise MissingVCSTool('Unable to obtain %s path. Try running '
+                             '|mach bootstrap| to ensure your environment is up to '
+                             'date.' % tool)
+    return path
 
 
 class Repository(object):
@@ -81,9 +72,19 @@ class Repository(object):
     def __init__(self, path, tool):
         self.path = os.path.abspath(path)
         self._tool = get_tool_path(tool)
-        self._env = os.environ.copy()
         self._version = None
         self._valid_diff_filter = ('m', 'a', 'd')
+
+        if os.name == 'nt' and sys.version_info[0] == 2:
+            self._env = {}
+            for k, v in os.environ.iteritems():
+                if isinstance(k, unicode):
+                    k = k.encode('utf8')
+                if isinstance(v, unicode):
+                    v = v.encode('utf8')
+                self._env[k] = v
+        else:
+            self._env = os.environ.copy()
 
     def __enter__(self):
         return self
@@ -98,7 +99,8 @@ class Repository(object):
         try:
             return subprocess.check_output(cmd,
                                            cwd=self.path,
-                                           env=self._env)
+                                           env=self._env,
+                                           universal_newlines=True)
         except subprocess.CalledProcessError as e:
             if e.returncode in return_codes:
                 return ''
@@ -263,7 +265,10 @@ class HgRepository(Repository):
     def _run(self, *args, **runargs):
         if not self._client.server:
             return super(HgRepository, self)._run(*args, **runargs)
-        return self._client.rawcommand(args)
+
+        # hglib requires bytes on python 3
+        args = [a.encode('utf-8') if not isinstance(a, bytes) else a for a in args]
+        return self._client.rawcommand(args).decode('utf-8')
 
     def sparse_checkout_present(self):
         # We assume a sparse checkout is enabled if the .hg/sparse file
@@ -343,7 +348,8 @@ class HgRepository(Repository):
 
     def push_to_try(self, message):
         try:
-            subprocess.check_call((self._tool, 'push-to-try', '-m', message), cwd=self.path)
+            subprocess.check_call((self._tool, 'push-to-try', '-m', message), cwd=self.path,
+                                  env=self._env)
         except subprocess.CalledProcessError:
             try:
                 self._run('showconfig', 'extensions.push-to-try')

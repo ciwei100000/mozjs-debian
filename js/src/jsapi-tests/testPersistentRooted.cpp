@@ -54,7 +54,9 @@ struct Kennel {
 // conservative GC doesn't find stray references to the barker. Ugh.
 MOZ_NEVER_INLINE static Kennel* Allocate(JSContext* cx) {
   RootedObject barker(cx, JS_NewObject(cx, &BarkWhenTracedClass::class_));
-  if (!barker) return nullptr;
+  if (!barker) {
+    return nullptr;
+  }
 
   return new Kennel(cx, barker);
 }

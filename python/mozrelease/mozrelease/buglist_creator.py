@@ -10,6 +10,7 @@ import os
 import re
 import requests
 from taskcluster.notify import Notify
+from taskcluster import optionsFromEnvironment
 from operator import itemgetter
 
 from mozilla_version.gecko import GeckoVersion
@@ -200,10 +201,11 @@ def email_release_drivers(
 A new build has been started:
 
 Commit: [{revision}]({repo}/rev/{revision})
-Task group: [{task_group_id}](https://tools.taskcluster.net/groups/{task_group_id})
+Task group: [{task_group_id}]({root_url}/tasks/groups/{task_group_id})
 
 {email_buglist_string}
 """.format(repo=repo, revision=revision,
+           root_url=os.environ['TASKCLUSTER_ROOT_URL'],
            task_group_id=task_group_id,
            email_buglist_string=email_buglist_string)
 
@@ -216,11 +218,12 @@ Task group: [{task_group_id}](https://tools.taskcluster.net/groups/{task_group_i
 
     subject = '{} Build of {} {} build {}'.format(subject_prefix, product, version, build_number)
 
-    notify_options = {}
+    # use proxy if configured, otherwise local credentials from env vars
     if 'TASKCLUSTER_PROXY_URL' in os.environ:
-        # Until bug 1460015 is finished, use the old baseUrl style of proxy URL
-        base_url = os.environ['TASKCLUSTER_PROXY_URL'].rstrip('/')
-        notify_options['baseUrl'] = '{}/notify/v1'.format(base_url)
+        notify_options = {'rootUrl': os.environ['TASKCLUSTER_PROXY_URL']}
+    else:
+        notify_options = optionsFromEnvironment()
+
     notify = Notify(notify_options)
     for address in addresses:
         notify.email({

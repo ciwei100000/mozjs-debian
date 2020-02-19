@@ -27,9 +27,6 @@ import os
 import re
 import sys
 
-from mozversioncontrol import get_repository_from_env
-
-
 architecture_independent = set(['generic'])
 all_unsupported_architectures_names = set(['mips32', 'mips64', 'mips_shared'])
 all_architecture_names = set(['x86', 'x64', 'arm', 'arm64'])
@@ -40,7 +37,8 @@ reArgType = "(?P<type>[\w\s:*&]+)"
 reArgName = "(?P<name>\s\w+)"
 reArgDefault = "(?P<default>(?:\s=[^,)]+)?)"
 reAfterArg = "(?=[,)])"
-reMatchArg = re.compile(reBeforeArg + reArgType + reArgName + reArgDefault + reAfterArg)
+reMatchArg = re.compile(reBeforeArg + reArgType +
+                        reArgName + reArgDefault + reAfterArg)
 
 
 def get_normalized_signatures(signature, fileAnnot=None):
@@ -63,7 +61,8 @@ def get_normalized_signatures(signature, fileAnnot=None):
         archs = [fileAnnot['arch']]
 
     if 'DEFINED_ON(' in signature:
-        archs = re.sub(r'.*DEFINED_ON\((?P<archs>[^()]*)\).*', '\g<archs>', signature).split(',')
+        archs = re.sub(
+            r'.*DEFINED_ON\((?P<archs>[^()]*)\).*', '\g<archs>', signature).split(',')
         archs = [a.strip() for a in archs]
         signature = re.sub(r'\s+DEFINED_ON\([^()]*\)', '', signature)
 
@@ -161,6 +160,10 @@ def get_macroassembler_definitions(filename):
             if not style_section:
                 continue
 
+            # Ignore preprocessor directives.
+            if line.startswith('#'):
+                continue
+
             # Remove comments from the processed line.
             line = re.sub(r'//.*', '', line)
 
@@ -180,7 +183,8 @@ def get_macroassembler_definitions(filename):
             if open_curly_brace != -1 and was_braces_depth == 0:
                 lines = lines + line[:open_curly_brace]
                 if 'MacroAssembler::' in lines:
-                    signatures.extend(get_normalized_signatures(lines, fileAnnot))
+                    signatures.extend(
+                        get_normalized_signatures(lines, fileAnnot))
                 lines = ''
                 continue
 
@@ -219,10 +223,15 @@ def get_macroassembler_declaration(filename):
             if not style_section:
                 continue
 
+            # Ignore preprocessor directives.
+            if line.startswith('#'):
+                continue
+
             line = re.sub(r'//.*', '', line)
             if len(line.strip()) == 0 or 'public:' in line or 'private:' in line:
                 lines = ''
                 continue
+
             lines = lines + line
 
             # Continue until we have a complete declaration
@@ -269,7 +278,8 @@ def generate_file_content(signatures):
             elif len(archs.symmetric_difference(all_shared_architecture_names)) == 0:
                 output.append(s + ' PER_SHARED_ARCH;\n')
             else:
-                output.append(s + ' DEFINED_ON(' + ', '.join(sorted(archs)) + ');\n')
+                output.append(
+                    s + ' DEFINED_ON(' + ', '.join(sorted(archs)) + ');\n')
             for a in sorted(archs):
                 a = a.replace('_', '-')
                 masm = '%s/MacroAssembler-%s' % (a, a)
@@ -287,19 +297,22 @@ def check_style():
     # We infer from each file the signature of each MacroAssembler function.
     defs = dict()       # type: dict(signature => ['x86', 'x64'])
 
-    with get_repository_from_env() as repo:
-        # Select the appropriate files.
-        for filename in repo.get_files_in_working_directory():
-            if not filename.startswith('js/src/jit/'):
-                continue
+    root_dir = os.path.join('js', 'src', 'jit')
+    for dirpath, dirnames, filenames in os.walk(root_dir):
+        for filename in filenames:
             if 'MacroAssembler' not in filename:
                 continue
 
-            filename = os.path.join(repo.path, filename)
+            filepath = os.path.join(dirpath, filename).replace('\\', '/')
 
-            if filename.endswith('MacroAssembler.h'):
-                decls = append_signatures(decls, get_macroassembler_declaration(filename))
-            defs = append_signatures(defs, get_macroassembler_definitions(filename))
+            if filepath.endswith('MacroAssembler.h'):
+                decls = append_signatures(
+                    decls, get_macroassembler_declaration(filepath))
+            defs = append_signatures(
+                defs, get_macroassembler_definitions(filepath))
+
+    if not decls or not defs:
+        raise Exception("Did not find any definitions or declarations")
 
     # Compare declarations and definitions output.
     difflines = difflib.unified_diff(generate_file_content(decls),

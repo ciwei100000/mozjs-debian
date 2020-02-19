@@ -3,11 +3,12 @@
 from __future__ import absolute_import
 
 import os
-import proctest
+import signal
+import sys
+
 import mozinfo
-
 import mozunit
-
+import proctest
 from mozprocess import processhandler
 
 here = os.path.dirname(os.path.abspath(__file__))
@@ -42,9 +43,17 @@ class ProcTestWait(proctest.ProcTest):
         """ Process is started, runs but we time out waiting on it
             to complete
         """
+        myenv = None
+        # On macosx1014, subprocess fails to find `six` when run with python3.
+        # This ensures that subprocess first looks to sys.path to find `six`.
+        # See https://bugzilla.mozilla.org/show_bug.cgi?id=1562083
+        if sys.platform == 'darwin' and sys.version_info[0] > 2:
+            myenv = os.environ.copy()
+            myenv['PYTHONPATH'] = ':'.join(sys.path)
+
         p = processhandler.ProcessHandler([self.python, self.proclaunch,
                                            "process_waittimeout.ini"],
-                                          cwd=here)
+                                          cwd=here, env=myenv)
         p.run(timeout=10)
         p.wait()
 
@@ -100,6 +109,27 @@ class ProcTestWait(proctest.ProcTest):
                             'Negative returncode expected, got "%s"' % returncode2)
         self.assertEqual(returncode1, returncode2,
                          'Expected both returncodes of wait() to be equal')
+
+    def test_wait_after_external_kill(self):
+        """Process is killed externally, and poll() is called."""
+        p = processhandler.ProcessHandler([self.python, self.proclaunch,
+                                           "process_normal_finish.ini"],
+                                          cwd=here)
+        p.run()
+        os.kill(p.pid, signal.SIGTERM)
+        returncode = p.wait()
+
+        # We killed the process, so the returncode should be non-zero
+        if mozinfo.isWin:
+            self.assertEqual(returncode, signal.SIGTERM,
+                             'Positive returncode expected, got "%s"' % returncode)
+        else:
+            self.assertEqual(returncode, -signal.SIGTERM,
+                             '%s expected, got "%s"' % (-signal.SIGTERM, returncode))
+
+        self.assertEqual(returncode, p.poll())
+
+        self.determine_status(p)
 
 
 if __name__ == '__main__':

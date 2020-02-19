@@ -10,24 +10,13 @@
 #include "jsapi.h"
 #include "jsfriendapi.h"
 #include "js/Initialization.h"
+#include "js/Warnings.h"  // JS::SetWarningReporter
 
 using namespace JS;
 
-static const JSClassOps global_classOps = {nullptr,
-                                           nullptr,
-                                           nullptr,
-                                           nullptr,
-                                           nullptr,
-                                           nullptr,
-                                           nullptr,
-                                           nullptr,
-                                           nullptr,
-                                           nullptr,
-                                           JS_GlobalObjectTraceHook};
-
 /* The class of the global object. */
 static const JSClass global_class = {"global", JSCLASS_GLOBAL_FLAGS,
-                                     &global_classOps};
+                                     &DefaultGlobalClassOps};
 
 static volatile int dontOptimizeMeAway = 0;
 
@@ -35,12 +24,16 @@ void usePointer(const void* ptr) { dontOptimizeMeAway++; }
 
 template <typename T>
 static inline T* checkPtr(T* ptr) {
-  if (!ptr) abort();
+  if (!ptr) {
+    abort();
+  }
   return ptr;
 }
 
 static void checkBool(bool success) {
-  if (!success) abort();
+  if (!success) {
+    abort();
+  }
 }
 
 /* The warning reporter callback. */
@@ -72,18 +65,12 @@ int main(int argc, const char** argv) {
   checkBool(JS::InitSelfHostedCode(cx));
   JS::SetWarningReporter(cx, reportWarning);
 
-  JSAutoRequest ar(cx);
-
   /* Create the global object. */
-  JS::CompartmentOptions options;
+  JS::RealmOptions options;
   RootedObject global(
       cx, checkPtr(JS_NewGlobalObject(cx, &global_class, nullptr,
                                       JS::FireOnNewGlobalHook, options)));
-  JSAutoCompartment ac(cx, global);
-
-  /* Populate the global object with the standard globals,
-     like Object and Array. */
-  checkBool(JS_InitStandardClasses(cx, global));
+  JSAutoRealm ar(cx, global);
 
   argv++;
   while (*argv) {

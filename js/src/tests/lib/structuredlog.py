@@ -1,9 +1,13 @@
-# produce mozlog-compatible log messages, following the spec at https://mozbase.readthedocs.io/en/latest/mozlog.html
+# produce mozlog-compatible log messages, following the spec at
+# https://mozbase.readthedocs.io/en/latest/mozlog.html
+
+from __future__ import print_function
 
 import json
 import os
 
 from time import time
+
 
 class TestLogger(object):
     def __init__(self, source, threadname='main'):
@@ -12,6 +16,8 @@ class TestLogger(object):
             'thread': threadname,
             'pid': os.getpid(),
         }
+        directory = os.environ.get("MOZ_UPLOAD_DIR", ".")
+        self.fh = open(os.path.join(directory, threadname + "_raw.log"), "a")
 
     def _record(self, **kwargs):
         record = self.template.copy()
@@ -21,7 +27,7 @@ class TestLogger(object):
         return record
 
     def _log_obj(self, obj):
-        print(json.dumps(obj, sort_keys=True))
+        print(json.dumps(obj, sort_keys=True), file=self.fh)
 
     def _log(self, **kwargs):
         self._log_obj(self._record(**kwargs))
@@ -39,7 +45,7 @@ class TestLogger(object):
         self._log(action='test_end', test=testname, status=status)
 
     def test(self, testname, status, duration, **details):
-        record = self._record(action='test_start', test=testname)
+        record = self._record(action='test_start', test=testname, **details.get('extra', {}))
         end_time = record['time']
         record['time'] -= duration
         self._log_obj(record)

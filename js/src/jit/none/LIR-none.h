@@ -1,5 +1,5 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
- * vim: set ts=8 sts=4 et sw=4 tw=99:
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+ * vim: set ts=8 sts=2 et sw=2 tw=80:
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -12,6 +12,7 @@ namespace jit {
 
 class LUnboxFloatingPoint : public LInstruction {
  public:
+  LIR_HEADER(UnboxFloatingPoint)
   static const size_t Input = 0;
 
   MUnbox* mir() const { MOZ_CRASH(); }
@@ -22,6 +23,7 @@ class LUnboxFloatingPoint : public LInstruction {
 
 class LTableSwitch : public LInstruction {
  public:
+  LIR_HEADER(TableSwitch)
   MTableSwitch* mir() { MOZ_CRASH(); }
 
   const LAllocation* index() { MOZ_CRASH(); }
@@ -31,6 +33,7 @@ class LTableSwitch : public LInstruction {
 
 class LTableSwitchV : public LInstruction {
  public:
+  LIR_HEADER(TableSwitchV)
   MTableSwitch* mir() { MOZ_CRASH(); }
 
   const LDefinition* tempInt() { MOZ_CRASH(); }
@@ -43,7 +46,7 @@ class LTableSwitchV : public LInstruction {
 class LWasmUint32ToFloat32 : public LInstructionHelper<1, 1, 0> {
  public:
   explicit LWasmUint32ToFloat32(const LAllocation&)
-      : LInstructionHelper(LOp_Invalid) {
+      : LInstructionHelper(Opcode::Invalid) {
     MOZ_CRASH();
   }
 };
@@ -58,14 +61,15 @@ class LUnbox : public LInstructionHelper<1, 2, 0> {
 class LDivI : public LBinaryMath<1> {
  public:
   LDivI(const LAllocation&, const LAllocation&, const LDefinition&)
-      : LBinaryMath(LOp_Invalid) {
+      : LBinaryMath(Opcode::Invalid) {
     MOZ_CRASH();
   }
   MDiv* mir() const { MOZ_CRASH(); }
 };
 class LDivPowTwoI : public LInstructionHelper<1, 1, 0> {
  public:
-  LDivPowTwoI(const LAllocation&, int32_t) : LInstructionHelper(LOp_Invalid) {
+  LDivPowTwoI(const LAllocation&, int32_t)
+      : LInstructionHelper(Opcode::Invalid) {
     MOZ_CRASH();
   }
   const LAllocation* numerator() { MOZ_CRASH(); }
@@ -75,7 +79,7 @@ class LDivPowTwoI : public LInstructionHelper<1, 1, 0> {
 class LModI : public LBinaryMath<1> {
  public:
   LModI(const LAllocation&, const LAllocation&, const LDefinition&)
-      : LBinaryMath(LOp_Invalid) {
+      : LBinaryMath(Opcode::Invalid) {
     MOZ_CRASH();
   }
 
@@ -85,7 +89,7 @@ class LModI : public LBinaryMath<1> {
 class LWasmUint32ToDouble : public LInstructionHelper<1, 1, 0> {
  public:
   explicit LWasmUint32ToDouble(const LAllocation&)
-      : LInstructionHelper(LOp_Invalid) {
+      : LInstructionHelper(Opcode::Invalid) {
     MOZ_CRASH();
   }
 };
@@ -93,7 +97,7 @@ class LModPowTwoI : public LInstructionHelper<1, 1, 0> {
  public:
   int32_t shift() { MOZ_CRASH(); }
   LModPowTwoI(const LAllocation& lhs, int32_t shift)
-      : LInstructionHelper(LOp_Invalid) {
+      : LInstructionHelper(Opcode::Invalid) {
     MOZ_CRASH();
   }
   MMod* mir() const { MOZ_CRASH(); }

@@ -1,5 +1,5 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
- * vim: set ts=8 sts=4 et sw=4 tw=99:
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+ * vim: set ts=8 sts=2 et sw=2 tw=80:
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -11,12 +11,12 @@
 
 #include "vm/ProxyObject.h"
 
+#include "gc/WeakMap-inl.h"
+
 namespace js {
 
 static bool TryPreserveReflector(JSContext* cx, HandleObject obj) {
-  if (obj->getClass()->isWrappedNative() || obj->getClass()->isDOMClass() ||
-      (obj->is<ProxyObject>() && obj->as<ProxyObject>().handler()->family() ==
-                                     GetDOMProxyHandlerFamily())) {
+  if (obj->getClass()->isDOMClass()) {
     MOZ_ASSERT(cx->runtime()->preserveWrapperCallback);
     if (!cx->runtime()->preserveWrapperCallback(cx, obj)) {
       JS_ReportErrorNumberASCII(cx, GetErrorMessage, nullptr,
@@ -33,9 +33,7 @@ static MOZ_ALWAYS_INLINE bool WeakCollectionPutEntryInternal(
   ObjectValueMap* map = obj->getMap();
   if (!map) {
     auto newMap = cx->make_unique<ObjectValueMap>(cx, obj.get());
-    if (!newMap) return false;
-    if (!newMap->init()) {
-      JS_ReportOutOfMemory(cx);
+    if (!newMap) {
       return false;
     }
     map = newMap.release();
@@ -43,11 +41,13 @@ static MOZ_ALWAYS_INLINE bool WeakCollectionPutEntryInternal(
   }
 
   // Preserve wrapped native keys to prevent wrapper optimization.
-  if (!TryPreserveReflector(cx, key)) return false;
+  if (!TryPreserveReflector(cx, key)) {
+    return false;
+  }
 
-  if (JSWeakmapKeyDelegateOp op = key->getClass()->extWeakmapKeyDelegateOp()) {
-    RootedObject delegate(cx, op(key));
-    if (delegate && !TryPreserveReflector(cx, delegate)) return false;
+  RootedObject delegate(cx, UncheckedUnwrapWithoutExpose(key));
+  if (delegate && !TryPreserveReflector(cx, delegate)) {
+    return false;
   }
 
   MOZ_ASSERT(key->compartment() == obj->compartment());

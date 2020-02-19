@@ -1,5 +1,5 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
- * vim: set ts=8 sts=4 et sw=4 tw=99:
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+ * vim: set ts=8 sts=2 et sw=2 tw=80:
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -58,11 +58,11 @@ class MOZ_STACK_CLASS JSONParserBase {
 
   // State for an array that is currently being parsed. This includes all
   // elements that have been seen so far.
-  typedef Vector<Value, 20> ElementVector;
+  typedef GCVector<Value, 20> ElementVector;
 
   // State for an object that is currently being parsed. This includes all
   // the key/value pairs that have been seen so far.
-  typedef Vector<IdValuePair, 10> PropertyVector;
+  typedef GCVector<IdValuePair, 10> PropertyVector;
 
   // Possible states the parser can be in between values.
   enum ParserState {
@@ -133,12 +133,12 @@ class MOZ_STACK_CLASS JSONParserBase {
       : v(other.v),
         cx(other.cx),
         errorHandling(other.errorHandling),
-        stack(mozilla::Move(other.stack)),
-        freeElements(mozilla::Move(other.freeElements)),
-        freeProperties(mozilla::Move(other.freeProperties))
+        stack(std::move(other.stack)),
+        freeElements(std::move(other.freeElements)),
+        freeProperties(std::move(other.freeProperties))
 #ifdef DEBUG
         ,
-        lastToken(mozilla::Move(other.lastToken))
+        lastToken(std::move(other.lastToken))
 #endif
   {
   }
@@ -222,7 +222,7 @@ class MOZ_STACK_CLASS JSONParser : public JSONParserBase {
 
   /* Allow move construction for use with Rooted. */
   JSONParser(JSONParser&& other)
-      : JSONParserBase(mozilla::Move(other)),
+      : JSONParserBase(std::move(other)),
         current(other.current),
         begin(other.begin),
         end(other.end) {}

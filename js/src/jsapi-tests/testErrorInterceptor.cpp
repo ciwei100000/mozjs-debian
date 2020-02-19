@@ -7,25 +7,27 @@
 // Tests for JS_GetErrorInterceptorCallback and JS_SetErrorInterceptorCallback.
 
 namespace {
-const double EXN_VALUE = 3.14;
-
 static JS::PersistentRootedString gLatestMessage;
 
 // An interceptor that stores the error in `gLatestMessage`.
 struct SimpleInterceptor : JSErrorInterceptor {
-  virtual void interceptError(JSContext* cx, const JS::Value& val) override {
-    js::StringBuffer buffer(cx);
-    if (!ValueToStringBuffer(cx, val, buffer))
+  virtual void interceptError(JSContext* cx, JS::HandleValue val) override {
+    js::JSStringBuilder buffer(cx);
+    if (!ValueToStringBuffer(cx, val, buffer)) {
       MOZ_CRASH("Could not convert to string buffer");
+    }
     gLatestMessage = buffer.finishString();
-    if (!gLatestMessage) MOZ_CRASH("Could not convert to string");
+    if (!gLatestMessage) {
+      MOZ_CRASH("Could not convert to string");
+    }
   }
 };
 
 bool equalStrings(JSContext* cx, JSString* a, JSString* b) {
   int32_t result = 0;
-  if (!JS_CompareStrings(cx, a, b, &result))
+  if (!JS_CompareStrings(cx, a, b, &result)) {
     MOZ_CRASH("Could not compare strings");
+  }
   return result == 0;
 }
 }  // namespace
@@ -64,8 +66,9 @@ BEGIN_TEST(testErrorInterceptor) {
   CHECK(gLatestMessage == nullptr);
 
   for (auto sample : SAMPLES) {
-    if (execDontReport(sample, __FILE__, __LINE__))
+    if (execDontReport(sample, __FILE__, __LINE__)) {
       MOZ_CRASH("This sample should have failed");
+    }
     CHECK(JS_IsExceptionPending(cx));
     CHECK(gLatestMessage == nullptr);
     JS_ClearPendingException(cx);
@@ -86,8 +89,9 @@ BEGIN_TEST(testErrorInterceptor) {
   // Test error throwing with a callback that succeeds.
   for (size_t i = 0; i < mozilla::ArrayLength(SAMPLES); ++i) {
     // This should cause the appropriate error.
-    if (execDontReport(SAMPLES[i], __FILE__, __LINE__))
+    if (execDontReport(SAMPLES[i], __FILE__, __LINE__)) {
       MOZ_CRASH("This sample should have failed");
+    }
     CHECK(JS_IsExceptionPending(cx));
 
     // Check result of callback.
@@ -99,7 +103,7 @@ BEGIN_TEST(testErrorInterceptor) {
     CHECK(JS_GetPendingException(cx, &exn));
     JS_ClearPendingException(cx);
 
-    js::StringBuffer buffer(cx);
+    js::JSStringBuilder buffer(cx);
     CHECK(ValueToStringBuffer(cx, exn, buffer));
     JS::Rooted<JSFlatString*> flat(cx, buffer.finishString());
     CHECK(equalStrings(cx, flat, gLatestMessage));
@@ -111,8 +115,9 @@ BEGIN_TEST(testErrorInterceptor) {
   // Test again without callback.
   JS_SetErrorInterceptorCallback(cx->runtime(), nullptr);
   for (size_t i = 0; i < mozilla::ArrayLength(SAMPLES); ++i) {
-    if (execDontReport(SAMPLES[i], __FILE__, __LINE__))
+    if (execDontReport(SAMPLES[i], __FILE__, __LINE__)) {
       MOZ_CRASH("This sample should have failed");
+    }
     CHECK(JS_IsExceptionPending(cx));
 
     // Check that the callback wasn't called.
@@ -123,7 +128,7 @@ BEGIN_TEST(testErrorInterceptor) {
     CHECK(JS_GetPendingException(cx, &exn));
     JS_ClearPendingException(cx);
 
-    js::StringBuffer buffer(cx);
+    js::JSStringBuilder buffer(cx);
     CHECK(ValueToStringBuffer(cx, exn, buffer));
     JS::Rooted<JSFlatString*> flat(cx, buffer.finishString());
     CHECK(js::StringEqualsAscii(flat, TO_STRING[i]));

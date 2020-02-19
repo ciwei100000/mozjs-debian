@@ -2,7 +2,11 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+#include "mozilla/Utf8.h"  // mozilla::Utf8Unit
+
 #include "gc/GCInternals.h"
+#include "js/CompilationAndEvaluation.h"  // JS::Compile{,ForNonSyntacticScope}{,DontInflate}
+#include "js/SourceText.h"                // JS::Source{Ownership,Text}
 #include "jsapi-tests/tests.h"
 #include "vm/Monitor.h"
 #include "vm/MutexIDs.h"
@@ -13,31 +17,33 @@ using js::AutoLockMonitor;
 struct OffThreadTask {
   OffThreadTask() : monitor(js::mutexid::ShellOffThreadState), token(nullptr) {}
 
-  void* waitUntilDone(JSContext* cx) {
-    if (OffThreadParsingMustWaitForGC(cx->runtime())) js::gc::FinishGC(cx);
+  OffThreadToken* waitUntilDone(JSContext* cx) {
+    if (OffThreadParsingMustWaitForGC(cx->runtime())) {
+      js::gc::FinishGC(cx);
+    }
 
     AutoLockMonitor alm(monitor);
     while (!token) {
       alm.wait();
     }
-    void* result = token;
+    OffThreadToken* result = token;
     token = nullptr;
     return result;
   }
 
-  void markDone(void* tokenArg) {
+  void markDone(JS::OffThreadToken* tokenArg) {
     AutoLockMonitor alm(monitor);
     token = tokenArg;
     alm.notify();
   }
 
-  static void OffThreadCallback(void* token, void* context) {
+  static void OffThreadCallback(OffThreadToken* token, void* context) {
     auto self = static_cast<OffThreadTask*>(context);
     self->markDone(token);
   }
 
   js::Monitor monitor;
-  void* token;
+  OffThreadToken* token;
 };
 
 BEGIN_TEST(testCompileScript) {
@@ -55,39 +61,61 @@ bool testCompile(bool nonSyntactic) {
   static_assert(sizeof(src_16) / sizeof(*src_16) - 1 == length,
                 "Source buffers must be same length");
 
-  SourceBufferHolder buf(src_16, length, SourceBufferHolder::NoOwnership);
-
   JS::CompileOptions options(cx);
   options.setNonSyntacticScope(nonSyntactic);
+
+  JS::SourceText<char16_t> buf16;
+  CHECK(buf16.init(cx, src_16, length, JS::SourceOwnership::Borrowed));
 
   JS::RootedScript script(cx);
 
   // Check explicit non-syntactic compilation first to make sure it doesn't
   // modify our options object.
-  CHECK(CompileForNonSyntacticScope(cx, options, buf, &script));
+  script = CompileForNonSyntacticScope(cx, options, buf16);
+  CHECK(script);
   CHECK_EQUAL(script->hasNonSyntacticScope(), true);
 
-  CHECK(CompileForNonSyntacticScope(cx, options, src, length, &script));
+  JS::SourceText<mozilla::Utf8Unit> buf8;
+  CHECK(buf8.init(cx, src, length, JS::SourceOwnership::Borrowed));
+
+  script = CompileForNonSyntacticScopeDontInflate(cx, options, buf8);
+  CHECK(script);
   CHECK_EQUAL(script->hasNonSyntacticScope(), true);
 
-  CHECK(CompileForNonSyntacticScope(cx, options, src_16, length, &script));
-  CHECK_EQUAL(script->hasNonSyntacticScope(), true);
+  {
+    JS::SourceText<char16_t> srcBuf;
+    CHECK(srcBuf.init(cx, src_16, length, JS::SourceOwnership::Borrowed));
 
-  CHECK(Compile(cx, options, buf, &script));
+    script = CompileForNonSyntacticScope(cx, options, srcBuf);
+    CHECK(script);
+    CHECK_EQUAL(script->hasNonSyntacticScope(), true);
+  }
+
+  script = Compile(cx, options, buf16);
+  CHECK(script);
   CHECK_EQUAL(script->hasNonSyntacticScope(), nonSyntactic);
 
-  CHECK(Compile(cx, options, src, length, &script));
+  script = CompileDontInflate(cx, options, buf8);
+  CHECK(script);
   CHECK_EQUAL(script->hasNonSyntacticScope(), nonSyntactic);
 
-  CHECK(Compile(cx, options, src_16, length, &script));
-  CHECK_EQUAL(script->hasNonSyntacticScope(), nonSyntactic);
+  {
+    JS::SourceText<char16_t> srcBuf;
+    CHECK(srcBuf.init(cx, src_16, length, JS::SourceOwnership::Borrowed));
+
+    script = Compile(cx, options, srcBuf);
+    CHECK(script);
+    CHECK_EQUAL(script->hasNonSyntacticScope(), nonSyntactic);
+  }
 
   options.forceAsync = true;
   OffThreadTask task;
-  void* token;
+  OffThreadToken* token;
 
-  CHECK(CompileOffThread(cx, options, src_16, length, task.OffThreadCallback,
-                         &task));
+  JS::SourceText<char16_t> srcBuf;
+  CHECK(srcBuf.init(cx, src_16, length, JS::SourceOwnership::Borrowed));
+
+  CHECK(CompileOffThread(cx, options, srcBuf, task.OffThreadCallback, &task));
   CHECK(token = task.waitUntilDone(cx));
   CHECK(script = FinishOffThreadScript(cx, token));
   CHECK_EQUAL(script->hasNonSyntacticScope(), nonSyntactic);

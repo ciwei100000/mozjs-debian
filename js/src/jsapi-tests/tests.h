@@ -1,5 +1,5 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
- * vim: set ts=8 sts=4 et sw=4 tw=99:
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+ * vim: set ts=8 sts=2 et sw=2 tw=80:
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -8,6 +8,7 @@
 #define jsapi_tests_tests_h
 
 #include "mozilla/ArrayUtils.h"
+#include "mozilla/Sprintf.h"
 #include "mozilla/TypeTraits.h"
 
 #include <errno.h>
@@ -17,7 +18,11 @@
 
 #include "gc/GC.h"
 #include "js/AllocPolicy.h"
+#include "js/CharacterEncoding.h"
+#include "js/Equality.h"     // JS::SameValue
+#include "js/RegExpFlags.h"  // JS::RegExpFlags
 #include "js/Vector.h"
+#include "js/Warnings.h"  // JS::SetWarningReporter
 #include "vm/JSContext.h"
 
 /* Note: Aborts on OOM. */
@@ -35,12 +40,16 @@ class JSAPITestString {
   void clear() { chars.clearAndFree(); }
 
   JSAPITestString& operator+=(const char* s) {
-    if (!chars.append(s, strlen(s))) abort();
+    if (!chars.append(s, strlen(s))) {
+      abort();
+    }
     return *this;
   }
 
   JSAPITestString& operator+=(const JSAPITestString& s) {
-    if (!chars.append(s.begin(), s.length())) abort();
+    if (!chars.append(s.begin(), s.length())) {
+      abort();
+    }
     return *this;
   }
 };
@@ -67,9 +76,8 @@ class JSAPITest {
   JS::PersistentRootedObject global;
   bool knownFail;
   JSAPITestString msgs;
-  JSCompartment* oldCompartment;
 
-  JSAPITest() : cx(nullptr), knownFail(false), oldCompartment(nullptr) {
+  JSAPITest() : cx(nullptr), knownFail(false) {
     next = list;
     list = this;
   }
@@ -90,24 +98,24 @@ class JSAPITest {
     if (!exec(s, __FILE__, __LINE__)) return false; \
   } while (false)
 
-  bool exec(const char* bytes, const char* filename, int lineno);
+  bool exec(const char* utf8, const char* filename, int lineno);
 
   // Like exec(), but doesn't call fail() if JS::Evaluate returns false.
-  bool execDontReport(const char* bytes, const char* filename, int lineno);
+  bool execDontReport(const char* utf8, const char* filename, int lineno);
 
 #define EVAL(s, vp)                                         \
   do {                                                      \
     if (!evaluate(s, __FILE__, __LINE__, vp)) return false; \
   } while (false)
 
-  bool evaluate(const char* bytes, const char* filename, int lineno,
+  bool evaluate(const char* utf8, const char* filename, int lineno,
                 JS::MutableHandleValue vp);
 
   JSAPITestString jsvalToSource(JS::HandleValue v) {
-    JSString* str = JS_ValueToSource(cx, v);
-    if (str) {
-      JSAutoByteString bytes(cx, str);
-      if (!!bytes) return JSAPITestString(bytes.ptr());
+    if (JSString* str = JS_ValueToSource(cx, v)) {
+      if (JS::UniqueChars bytes = JS_EncodeStringToLatin1(cx, str)) {
+        return JSAPITestString(bytes.get());
+      }
     }
     JS_ClearPendingException(cx);
     return JSAPITestString("<<error converting value to string>>");
@@ -137,6 +145,12 @@ class JSAPITest {
     return JSAPITestString(buf);
   }
 
+  JSAPITestString toSource(double d) {
+    char buf[40];
+    SprintfLiteral(buf, "%17lg", d);
+    return JSAPITestString(buf);
+  }
+
   JSAPITestString toSource(unsigned int v) {
     return toSource((unsigned long)v);
   }
@@ -145,6 +159,26 @@ class JSAPITest {
 
   JSAPITestString toSource(bool v) {
     return JSAPITestString(v ? "true" : "false");
+  }
+
+  JSAPITestString toSource(JS::RegExpFlags flags) {
+    JSAPITestString str;
+    if (flags.global()) {
+      str += "g";
+    }
+    if (flags.ignoreCase()) {
+      str += "i";
+    }
+    if (flags.multiline()) {
+      str += "m";
+    }
+    if (flags.unicode()) {
+      str += "u";
+    }
+    if (flags.sticky()) {
+      str += "y";
+    }
+    return str;
   }
 
   JSAPITestString toSource(JSAtom* v) {
@@ -197,12 +231,12 @@ class JSAPITest {
                  const char* filename, int lineno) {
     bool same;
     JS::RootedValue actual(cx, actualArg), expected(cx, expectedArg);
-    return (JS_SameValue(cx, actual, expected, &same) && same) ||
+    return (JS::SameValue(cx, actual, expected, &same) && same) ||
            fail(JSAPITestString(
-                    "CHECK_SAME failed: expected JS_SameValue(cx, ") +
+                    "CHECK_SAME failed: expected JS::SameValue(cx, ") +
                     actualExpr + ", " + expectedExpr +
-                    "), got !JS_SameValue(cx, " + jsvalToSource(actual) + ", " +
-                    jsvalToSource(expected) + ")",
+                    "), got !JS::SameValue(cx, " + jsvalToSource(actual) +
+                    ", " + jsvalToSource(expected) + ")",
                 filename, lineno);
   }
 
@@ -229,20 +263,25 @@ class JSAPITest {
     message += msg;
 
     if (JS_IsExceptionPending(cx)) {
+      message += " -- ";
+
       js::gc::AutoSuppressGC gcoff(cx);
       JS::RootedValue v(cx);
       JS_GetPendingException(cx, &v);
       JS_ClearPendingException(cx);
       JSString* s = JS::ToString(cx, v);
       if (s) {
-        JSAutoByteString bytes(cx, s);
-        if (!!bytes) message += bytes.ptr();
+        if (JS::UniqueChars bytes = JS_EncodeStringToLatin1(cx, s)) {
+          message += bytes.get();
+        }
       }
     }
 
     fprintf(stderr, "%.*s\n", int(message.length()), message.begin());
 
-    if (msgs.length() != 0) msgs += " | ";
+    if (msgs.length() != 0) {
+      msgs += " | ";
+    }
     msgs += message;
     return false;
   }
@@ -250,18 +289,8 @@ class JSAPITest {
   JSAPITestString messages() const { return msgs; }
 
   static const JSClass* basicGlobalClass() {
-    static const JSClassOps cOps = {nullptr,
-                                    nullptr,
-                                    nullptr,
-                                    nullptr,
-                                    nullptr,
-                                    nullptr,
-                                    nullptr,
-                                    nullptr,
-                                    nullptr,
-                                    nullptr,
-                                    JS_GlobalObjectTraceHook};
-    static const JSClass c = {"global", JSCLASS_GLOBAL_FLAGS, &cOps};
+    static const JSClass c = {"global", JSCLASS_GLOBAL_FLAGS,
+                              &JS::DefaultGlobalClassOps};
     return &c;
   }
 
@@ -271,11 +300,14 @@ class JSAPITest {
 
     for (unsigned i = 0; i < args.length(); i++) {
       JSString* str = JS::ToString(cx, args[i]);
-      if (!str) return false;
-      char* bytes = JS_EncodeString(cx, str);
-      if (!bytes) return false;
-      printf("%s%s", i ? " " : "", bytes);
-      JS_free(cx, bytes);
+      if (!str) {
+        return false;
+      }
+      JS::UniqueChars bytes = JS_EncodeStringToLatin1(cx, str);
+      if (!bytes) {
+        return false;
+      }
+      printf("%s%s", i ? " " : "", bytes.get());
     }
 
     putchar('\n');
@@ -305,7 +337,9 @@ class JSAPITest {
 
   virtual JSContext* createContext() {
     JSContext* cx = JS_NewContext(8L * 1024 * 1024);
-    if (!cx) return nullptr;
+    if (!cx) {
+      return nullptr;
+    }
     JS::SetWarningReporter(cx, &reportWarning);
     setNativeStackQuota(cx);
     return cx;
@@ -331,11 +365,13 @@ class JSAPITest {
   virtual JSObject* createGlobal(JSPrincipals* principals = nullptr);
 };
 
-#define BEGIN_TEST(testname)                                  \
+#define BEGIN_TEST_WITH_ATTRIBUTES(testname, attrs)           \
   class cls_##testname : public JSAPITest {                   \
    public:                                                    \
     virtual const char* name() override { return #testname; } \
-    virtual bool run(JS::HandleObject global) override
+    virtual bool run(JS::HandleObject global) override attrs
+
+#define BEGIN_TEST(testname) BEGIN_TEST_WITH_ATTRIBUTES(testname, )
 
 #define END_TEST(testname) \
   }                        \
@@ -375,8 +411,12 @@ class TempFile {
  public:
   TempFile() : name(), stream() {}
   ~TempFile() {
-    if (stream) close();
-    if (name) remove();
+    if (stream) {
+      close();
+    }
+    if (name) {
+      remove();
+    }
   }
 
   /*
@@ -428,40 +468,31 @@ class TestJSPrincipals : public JSPrincipals {
   }
 };
 
-// A class that simulates refcounted data, for testing with array buffers.
-class RefCountedData {
+// A class that simulates externally memory-managed data, for testing with
+// array buffers.
+class ExternalData {
   char* contents_;
   size_t len_;
-  size_t refcount_;
 
  public:
-  explicit RefCountedData(const char* str)
-      : contents_(strdup(str)), len_(strlen(str) + 1), refcount_(1) {}
+  explicit ExternalData(const char* str)
+      : contents_(strdup(str)), len_(strlen(str) + 1) {}
 
   size_t len() const { return len_; }
   void* contents() const { return contents_; }
   char* asString() const { return contents_; }
-  size_t refcount() const { return refcount_; }
+  bool wasFreed() const { return !contents_; }
 
-  void incref() { refcount_++; }
-  void decref() {
-    refcount_--;
-    if (refcount_ == 0) {
-      free(contents_);
-      contents_ = nullptr;
-    }
+  void free() {
+    MOZ_ASSERT(!wasFreed());
+    ::free(contents_);
+    contents_ = nullptr;
   }
 
-  static void incCallback(void* contents, void* userData) {
-    auto self = static_cast<RefCountedData*>(userData);
+  static void freeCallback(void* contents, void* userData) {
+    auto self = static_cast<ExternalData*>(userData);
     MOZ_ASSERT(self->contents() == contents);
-    self->incref();
-  }
-
-  static void decCallback(void* contents, void* userData) {
-    auto self = static_cast<RefCountedData*>(userData);
-    MOZ_ASSERT(self->contents() == contents);
-    self->decref();
+    self->free();
   }
 };
 
@@ -476,25 +507,27 @@ class AutoLeaveZeal {
   uint32_t frequency_;
 
  public:
-  explicit AutoLeaveZeal(JSContext* cx) : cx_(cx) {
+  explicit AutoLeaveZeal(JSContext* cx) : cx_(cx), zealBits_(0), frequency_(0) {
     uint32_t dummy;
     JS_GetGCZealBits(cx_, &zealBits_, &frequency_, &dummy);
     JS_SetGCZeal(cx_, 0, 0);
     JS::PrepareForFullGC(cx_);
-    JS::GCForReason(cx_, GC_SHRINK, JS::gcreason::DEBUG_GC);
+    JS::NonIncrementalGC(cx_, GC_SHRINK, JS::GCReason::DEBUG_GC);
   }
   ~AutoLeaveZeal() {
     JS_SetGCZeal(cx_, 0, 0);
     for (size_t i = 0; i < sizeof(zealBits_) * 8; i++) {
-      if (zealBits_ & (1 << i)) JS_SetGCZeal(cx_, i, frequency_);
+      if (zealBits_ & (1 << i)) {
+        JS_SetGCZeal(cx_, i, frequency_);
+      }
     }
 
-#ifdef DEBUG
+#  ifdef DEBUG
     uint32_t zealBitsAfter, frequencyAfter, dummy;
     JS_GetGCZealBits(cx_, &zealBitsAfter, &frequencyAfter, &dummy);
     MOZ_ASSERT(zealBitsAfter == zealBits_);
     MOZ_ASSERT(frequencyAfter == frequency_);
-#endif
+#  endif
   }
 };
 #endif /* JS_GC_ZEAL */

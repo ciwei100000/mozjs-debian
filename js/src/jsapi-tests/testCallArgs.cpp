@@ -2,6 +2,10 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+#include "mozilla/Utf8.h"  // mozilla::Utf8Unit
+
+#include "js/CompilationAndEvaluation.h"  // JS::Evaluate
+#include "js/SourceText.h"                // JS::Source{Ownership,Text}
 #include "jsapi-tests/tests.h"
 
 static bool CustomNative(JSContext* cx, unsigned argc, JS::Value* vp) {
@@ -16,19 +20,20 @@ static bool CustomNative(JSContext* cx, unsigned argc, JS::Value* vp) {
   return true;
 }
 
-static bool TryConstruct(JSContext* cx, const char* code, const char* filename,
-                         decltype(__LINE__) lineno, JS::MutableHandleValue vp) {
-  JS::CompileOptions opts(cx);
-  opts.setFileAndLine(filename, lineno);
-  return JS::Evaluate(cx, opts, code, strlen(code), vp);
-}
-
 BEGIN_TEST(testCallArgs_isConstructing_native) {
   CHECK(JS_DefineFunction(cx, global, "customNative", CustomNative, 0, 0));
 
+  JS::CompileOptions opts(cx);
+  opts.setFileAndLine(__FILE__, __LINE__ + 4);
+
   JS::RootedValue result(cx);
 
-  CHECK(!TryConstruct(cx, "new customNative();", __FILE__, __LINE__, &result));
+  static const char code[] = "new customNative();";
+  JS::SourceText<mozilla::Utf8Unit> srcBuf;
+  CHECK(srcBuf.init(cx, code, strlen(code), JS::SourceOwnership::Borrowed));
+
+  CHECK(!JS::Evaluate(cx, opts, srcBuf, &result));
+
   CHECK(JS_IsExceptionPending(cx));
   JS_ClearPendingException(cx);
 
@@ -46,7 +51,9 @@ static bool CustomConstructor(JSContext* cx, unsigned argc, JS::Value* vp) {
 
   if (args.isConstructing()) {
     JSObject* obj = JS_NewPlainObject(cx);
-    if (!obj) return false;
+    if (!obj) {
+      return false;
+    }
 
     args.rval().setObject(*obj);
 

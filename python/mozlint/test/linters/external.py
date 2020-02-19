@@ -5,6 +5,7 @@
 from __future__ import absolute_import, print_function
 
 import os
+import time
 
 from mozlint import result
 from mozlint.errors import LintException
@@ -36,6 +37,11 @@ def raises(files, config, **lintargs):
     raise LintException("Oh no something bad happened!")
 
 
+def slow(files, config, **lintargs):
+    time.sleep(2)
+    return []
+
+
 def structured(files, config, logger, **kwargs):
     for path in files:
         if os.path.isdir(path):
@@ -50,15 +56,19 @@ def structured(files, config, logger, **kwargs):
                                       rule="no-foobar")
 
 
-def setup(root):
+def passes(files, config, **lintargs):
+    return []
+
+
+def setup(**lintargs):
     print('setup passed')
 
 
-def setupfailed(root):
+def setupfailed(**lintargs):
     print('setup failed')
     return 1
 
 
-def setupraised(root):
+def setupraised(**lintargs):
     print('setup raised')
     raise LintException('oh no setup failed')

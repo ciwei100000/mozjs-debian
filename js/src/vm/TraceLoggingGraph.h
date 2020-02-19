@@ -1,5 +1,5 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
- * vim: set ts=8 sts=4 et sw=4 tw=99:
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+ * vim: set ts=8 sts=2 et sw=2 tw=80:
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -108,7 +108,16 @@ class TraceLoggerGraphState {
   }
 };
 
+namespace js {
+class TraceLoggerThread;
+}  // namespace js
+
 class TraceLoggerGraph {
+  // This is needed so that we can write the data to the JSON writer from the TL
+  // thread class.
+  friend class js::TraceLoggerThread;
+
+ private:
   // The layout of the tree in memory and in the log file. Readable by JS
   // using TypedArrays.
   struct TreeEntry {
@@ -131,7 +140,7 @@ class TraceLoggerGraph {
       u.s.hasChildren_ = hasChildren;
       nextId_ = nextId;
     }
-    TreeEntry() {}
+    TreeEntry() : start_(0), stop_(0), u{}, nextId_(0) {}
     uint64_t start() { return start_; }
     uint64_t stop() { return stop_; }
     uint32_t textId() { return u.s.textId_; }
@@ -179,13 +188,15 @@ class TraceLoggerGraph {
   TraceLoggerGraph() {}
   ~TraceLoggerGraph();
 
-  bool init(uint64_t timestamp);
+  bool init(uint64_t timestamp, bool graphFileEnabled);
 
   // Link a textId with a particular text.
   void addTextId(uint32_t id, const char* text);
+  void addTextId(uint32_t id, const char* text, mozilla::Maybe<uint32_t>& line,
+                 mozilla::Maybe<uint32_t>& column);
 
   // Create a tree out of all the given events.
-  void log(ContinuousSpace<EventEntry>& events);
+  void log(ContinuousSpace<EventEntry>& events, mozilla::TimeStamp startTime);
 
   static size_t treeSizeFlushLimit() {
     // Allow tree size to grow to 100MB.

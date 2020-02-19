@@ -1,5 +1,5 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
- * vim: set ts=8 sts=4 et sw=4 tw=99:
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+ * vim: set ts=8 sts=2 et sw=2 tw=80:
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -8,7 +8,6 @@
 #define jit_shared_Assembler_shared_h
 
 #include "mozilla/CheckedInt.h"
-#include "mozilla/PodOperations.h"
 
 #include <limits.h>
 
@@ -23,18 +22,21 @@
 #if defined(JS_CODEGEN_ARM) || defined(JS_CODEGEN_ARM64) || \
     defined(JS_CODEGEN_MIPS32) || defined(JS_CODEGEN_MIPS64)
 // Push return addresses callee-side.
-#define JS_USE_LINK_REGISTER
+#  define JS_USE_LINK_REGISTER
 #endif
 
 #if defined(JS_CODEGEN_X64) || defined(JS_CODEGEN_ARM) || \
     defined(JS_CODEGEN_ARM64)
 // JS_SMALL_BRANCH means the range on a branch instruction
 // is smaller than the whole address space
-#define JS_SMALL_BRANCH
+#  define JS_SMALL_BRANCH
 #endif
 
-#if defined(JS_CODEGEN_MIPS32) || defined(JS_CODEGEN_MIPS64)
-#define JS_CODELABEL_LINKMODE
+#if defined(JS_CODEGEN_MIPS32) || defined(JS_CODEGEN_MIPS64) || \
+    defined(JS_CODEGEN_ARM64)
+// JS_CODELABEL_LINKMODE gives labels additional metadata
+// describing how Bind() should patch them.
+#  define JS_CODELABEL_LINKMODE
 #endif
 
 using mozilla::CheckedInt;
@@ -92,6 +94,7 @@ struct Imm32 {
   int32_t value;
 
   explicit Imm32(int32_t value) : value(value) {}
+  explicit Imm32(FrameType type) : Imm32(int32_t(type)) {}
 
   static inline Imm32 ShiftOf(enum Scale s) {
     switch (s) {
@@ -135,8 +138,7 @@ struct Imm64 {
 
 #ifdef DEBUG
 static inline bool IsCompilingWasm() {
-  // wasm compilation pushes a JitContext with a null JSCompartment.
-  return GetJitContext()->compartment == nullptr;
+  return GetJitContext()->isCompilingWasm();
 }
 #endif
 
@@ -265,7 +267,7 @@ struct Address {
   Address(RegisterOrSP base, int32_t offset) : base(base), offset(offset) {}
 #endif
 
-  Address() : base(RegisterOrSP(Registers::Invalid)), offset(0) {}
+  Address() = delete;
 };
 
 #if JS_BITS_PER_WORD == 32
@@ -302,11 +304,7 @@ struct BaseIndex {
       : base(base), index(index), scale(scale), offset(offset) {}
 #endif
 
-  BaseIndex()
-      : base(RegisterOrSP(Registers::Invalid)),
-        index(Registers::Invalid),
-        scale(TimesOne),
-        offset(0) {}
+  BaseIndex() = delete;
 };
 
 #if JS_BITS_PER_WORD == 32
@@ -374,17 +372,14 @@ struct BaseObjectSlotIndex : BaseValueIndex {
 #endif
 };
 
-class Relocation {
- public:
-  enum Kind {
-    // The target is immovable, so patching is only needed if the source
-    // buffer is relocated and the reference is relative.
-    HARDCODED,
+enum class RelocationKind {
+  // The target is immovable, so patching is only needed if the source
+  // buffer is relocated and the reference is relative.
+  HARDCODED,
 
-    // The target is the start of a JitCode buffer, which must be traced
-    // during garbage collection. Relocations and patching may be needed.
-    JITCODE
-  };
+  // The target is the start of a JitCode buffer, which must be traced
+  // during garbage collection. Relocations and patching may be needed.
+  JITCODE
 };
 
 class RepatchLabel {
@@ -492,10 +487,10 @@ typedef Vector<CodeLabel, 0, SystemAllocPolicy> CodeLabelVector;
 // start of the block.
 
 class CodeOffsetJump {
-  size_t offset_;
+  size_t offset_ = 0;
 
 #ifdef JS_SMALL_BRANCH
-  size_t jumpTableIndex_;
+  size_t jumpTableIndex_ = 0;
 #endif
 
  public:
@@ -507,7 +502,7 @@ class CodeOffsetJump {
   explicit CodeOffsetJump(size_t offset) : offset_(offset) {}
 #endif
 
-  CodeOffsetJump() { mozilla::PodZero(this); }
+  CodeOffsetJump() = default;
 
   size_t offset() const { return offset_; }
   void fixup(MacroAssembler* masm);
@@ -616,7 +611,7 @@ class CodeLocationLabel {
     return raw_ - other.raw_;
   }
 
-  void repoint(JitCode* code, MacroAssembler* masm = nullptr);
+  void repoint(JitCode* code);
 
 #ifdef DEBUG
   bool isSet() const { return state_ != Uninitialized; }
@@ -657,47 +652,29 @@ class MemoryAccessDesc {
   uint32_t offset_;
   uint32_t align_;
   Scalar::Type type_;
-  unsigned numSimdElems_;
   jit::Synchronization sync_;
-  mozilla::Maybe<wasm::BytecodeOffset> trapOffset_;
+  wasm::BytecodeOffset trapOffset_;
 
  public:
   explicit MemoryAccessDesc(
       Scalar::Type type, uint32_t align, uint32_t offset,
-      const mozilla::Maybe<BytecodeOffset>& trapOffset,
-      unsigned numSimdElems = 0,
+      BytecodeOffset trapOffset,
       const jit::Synchronization& sync = jit::Synchronization::None())
       : offset_(offset),
         align_(align),
         type_(type),
-        numSimdElems_(numSimdElems),
         sync_(sync),
         trapOffset_(trapOffset) {
-    MOZ_ASSERT(Scalar::isSimdType(type) == (numSimdElems > 0));
-    MOZ_ASSERT(numSimdElems <= jit::ScalarTypeToLength(type));
     MOZ_ASSERT(mozilla::IsPowerOfTwo(align));
-    MOZ_ASSERT_IF(isSimd(), hasTrap());
-    MOZ_ASSERT_IF(isAtomic(), hasTrap());
   }
 
   uint32_t offset() const { return offset_; }
   uint32_t align() const { return align_; }
   Scalar::Type type() const { return type_; }
-  unsigned byteSize() const {
-    return Scalar::isSimdType(type())
-               ? Scalar::scalarByteSize(type()) * numSimdElems()
-               : Scalar::byteSize(type());
-  }
-  unsigned numSimdElems() const {
-    MOZ_ASSERT(isSimd());
-    return numSimdElems_;
-  }
+  unsigned byteSize() const { return Scalar::byteSize(type()); }
   const jit::Synchronization& sync() const { return sync_; }
-  bool hasTrap() const { return !!trapOffset_; }
-  BytecodeOffset trapOffset() const { return *trapOffset_; }
+  BytecodeOffset trapOffset() const { return trapOffset_; }
   bool isAtomic() const { return !sync_.isNone(); }
-  bool isSimd() const { return Scalar::isSimdType(type_); }
-  bool isPlainAsmJS() const { return !hasTrap(); }
 
   void clearOffset() { offset_ = 0; }
   void setOffset(uint32_t offset) { offset_ = offset; }
@@ -716,67 +693,6 @@ struct GlobalAccess {
 
 typedef Vector<GlobalAccess, 0, SystemAllocPolicy> GlobalAccessVector;
 
-// A CallFarJump records the offset of a jump that needs to be patched to a
-// call at the end of the module when all calls have been emitted.
-
-struct CallFarJump {
-  uint32_t funcIndex;
-  jit::CodeOffset jump;
-
-  CallFarJump(uint32_t funcIndex, jit::CodeOffset jump)
-      : funcIndex(funcIndex), jump(jump) {}
-
-  void offsetBy(size_t delta) { jump.offsetBy(delta); }
-};
-
-typedef Vector<CallFarJump, 0, SystemAllocPolicy> CallFarJumpVector;
-
-// The OldTrapDesc struct describes a wasm trap that is about to be emitted.
-// This includes the logical wasm bytecode offset to report, the kind of
-// instruction causing the trap, and the stack depth right before control is
-// transferred to the trap out-of-line path.
-
-struct OldTrapDesc : BytecodeOffset {
-  enum Kind { Jump, MemoryAccess };
-  Kind kind;
-  Trap trap;
-  uint32_t framePushed;
-
-  OldTrapDesc(BytecodeOffset offset, Trap trap, uint32_t framePushed,
-              Kind kind = Jump)
-      : BytecodeOffset(offset),
-        kind(kind),
-        trap(trap),
-        framePushed(framePushed) {}
-};
-
-// An OldTrapSite captures all relevant information at the point of emitting the
-// in-line trapping instruction for the purpose of generating the out-of-line
-// trap code (at the end of the function).
-
-struct OldTrapSite : OldTrapDesc {
-  uint32_t codeOffset;
-
-  OldTrapSite(OldTrapDesc trap, uint32_t codeOffset)
-      : OldTrapDesc(trap), codeOffset(codeOffset) {}
-};
-
-typedef Vector<OldTrapSite, 0, SystemAllocPolicy> OldTrapSiteVector;
-
-// An OldTrapFarJump records the offset of a jump that needs to be patched to a
-// trap exit at the end of the module when trap exits are emitted.
-
-struct OldTrapFarJump {
-  Trap trap;
-  jit::CodeOffset jump;
-
-  OldTrapFarJump(Trap trap, jit::CodeOffset jump) : trap(trap), jump(jump) {}
-
-  void offsetBy(size_t delta) { jump.offsetBy(delta); }
-};
-
-typedef Vector<OldTrapFarJump, 0, SystemAllocPolicy> OldTrapFarJumpVector;
-
 }  // namespace wasm
 
 namespace jit {
@@ -786,10 +702,6 @@ class AssemblerShared {
   wasm::CallSiteVector callSites_;
   wasm::CallSiteTargetVector callSiteTargets_;
   wasm::TrapSiteVectorArray trapSites_;
-  wasm::OldTrapSiteVector oldTrapSites_;
-  wasm::OldTrapFarJumpVector oldTrapFarJumps_;
-  wasm::CallFarJumpVector callFarJumps_;
-  wasm::MemoryAccessVector memoryAccesses_;
   wasm::SymbolicAccessVector symbolicAccesses_;
 
  protected:
@@ -809,8 +721,6 @@ class AssemblerShared {
 
   bool embedsNurseryPointers() const { return embedsNurseryPointers_; }
 
-  static bool canUseInSingleByteInstruction(Register reg) { return true; }
-
   void addCodeLabel(CodeLabel label) {
     propagateOOM(codeLabels_.append(label));
   }
@@ -825,42 +735,17 @@ class AssemblerShared {
   void append(const wasm::CallSiteDesc& desc, CodeOffset retAddr,
               Args&&... args) {
     enoughMemory_ &= callSites_.emplaceBack(desc, retAddr.offset());
-    enoughMemory_ &=
-        callSiteTargets_.emplaceBack(mozilla::Forward<Args>(args)...);
+    enoughMemory_ &= callSiteTargets_.emplaceBack(std::forward<Args>(args)...);
   }
   void append(wasm::Trap trap, wasm::TrapSite site) {
     enoughMemory_ &= trapSites_[trap].append(site);
   }
-  void append(wasm::OldTrapSite trapSite) {
-    enoughMemory_ &= oldTrapSites_.append(trapSite);
+  void append(const wasm::MemoryAccessDesc& access, uint32_t pcOffset) {
+    appendOutOfBoundsTrap(access.trapOffset(), pcOffset);
   }
-  void append(wasm::OldTrapFarJump jmp) {
-    enoughMemory_ &= oldTrapFarJumps_.append(jmp);
-  }
-  void append(wasm::CallFarJump jmp) {
-    enoughMemory_ &= callFarJumps_.append(jmp);
-  }
-  void append(wasm::MemoryAccess access) {
-    enoughMemory_ &= memoryAccesses_.append(access);
-  }
-  void append(const wasm::MemoryAccessDesc& access, size_t codeOffset,
-              size_t framePushed) {
-    if (access.hasTrap()) {
-      // If a memory access is trapping (wasm, SIMD.js, Atomics), create a
-      // OldTrapSite now which will generate a trap out-of-line path at the end
-      // of the function which will *then* append a MemoryAccess.
-      wasm::OldTrapDesc trap(access.trapOffset(), wasm::Trap::OutOfBounds,
-                             framePushed, wasm::OldTrapSite::MemoryAccess);
-      append(wasm::OldTrapSite(trap, codeOffset));
-    } else {
-      // Otherwise, this is a plain asm.js access. On WASM_HUGE_MEMORY
-      // platforms, asm.js uses signal handlers to remove bounds checks
-      // and thus requires a MemoryAccess.
-      MOZ_ASSERT(access.isPlainAsmJS());
-#ifdef WASM_HUGE_MEMORY
-      append(wasm::MemoryAccess(codeOffset));
-#endif
-    }
+  void appendOutOfBoundsTrap(wasm::BytecodeOffset trapOffset,
+                             uint32_t pcOffset) {
+    append(wasm::Trap::OutOfBounds, wasm::TrapSite(pcOffset, trapOffset));
   }
   void append(wasm::SymbolicAccess access) {
     enoughMemory_ &= symbolicAccesses_.append(access);
@@ -869,10 +754,6 @@ class AssemblerShared {
   wasm::CallSiteVector& callSites() { return callSites_; }
   wasm::CallSiteTargetVector& callSiteTargets() { return callSiteTargets_; }
   wasm::TrapSiteVectorArray& trapSites() { return trapSites_; }
-  wasm::OldTrapSiteVector& oldTrapSites() { return oldTrapSites_; }
-  wasm::OldTrapFarJumpVector& oldTrapFarJumps() { return oldTrapFarJumps_; }
-  wasm::CallFarJumpVector& callFarJumps() { return callFarJumps_; }
-  wasm::MemoryAccessVector& memoryAccesses() { return memoryAccesses_; }
   wasm::SymbolicAccessVector& symbolicAccesses() { return symbolicAccesses_; }
 };
 

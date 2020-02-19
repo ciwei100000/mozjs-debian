@@ -1,19 +1,23 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
- * vim: set ts=8 sts=4 et sw=4 tw=99:
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+ * vim: set ts=8 sts=2 et sw=2 tw=80:
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+#include "gc/Verifier.h"
 
 #include "mozilla/DebugOnly.h"
 #include "mozilla/IntegerPrintfMacros.h"
 #include "mozilla/Sprintf.h"
 
 #ifdef MOZ_VALGRIND
-#include <valgrind/memcheck.h>
+#  include <valgrind/memcheck.h>
 #endif
 
 #include "gc/GCInternals.h"
+#include "gc/GCLock.h"
 #include "gc/PublicIterators.h"
+#include "gc/WeakMap.h"
 #include "gc/Zone.h"
 #include "js/HashTable.h"
 #include "vm/JSContext.h"
@@ -25,6 +29,8 @@
 
 using namespace js;
 using namespace js::gc;
+
+using mozilla::DebugOnly;
 
 #ifdef JS_GC_ZEAL
 
@@ -100,7 +106,7 @@ class js::VerifyPreTracer final : public JS::CallbackTracer {
 
   explicit VerifyPreTracer(JSRuntime* rt)
       : JS::CallbackTracer(rt),
-        noggc(TlsContext.get()),
+        noggc(rt->mainContextFromOwnThread()),
         number(rt->gc.gcNumber()),
         count(0),
         curnode(nullptr),
@@ -119,7 +125,9 @@ void VerifyPreTracer::onChild(const JS::GCCellPtr& thing) {
   MOZ_ASSERT(!IsInsideNursery(thing.asCell()));
 
   // Skip things in other runtimes.
-  if (thing.asCell()->asTenured().runtimeFromAnyThread() != runtime()) return;
+  if (thing.asCell()->asTenured().runtimeFromAnyThread() != runtime()) {
+    return;
+  }
 
   edgeptr += sizeof(EdgeValue);
   if (edgeptr >= term) {
@@ -161,45 +169,51 @@ static VerifyNode* MakeNode(VerifyPreTracer* trc, void* thing,
 }
 
 static VerifyNode* NextNode(VerifyNode* node) {
-  if (node->count == 0)
+  if (node->count == 0) {
     return (VerifyNode*)((char*)node + sizeof(VerifyNode) - sizeof(EdgeValue));
-  else
+  } else {
     return (VerifyNode*)((char*)node + sizeof(VerifyNode) +
                          sizeof(EdgeValue) * (node->count - 1));
+  }
 }
 
 void gc::GCRuntime::startVerifyPreBarriers() {
-  if (verifyPreData || isIncrementalGCInProgress()) return;
+  if (verifyPreData || isIncrementalGCInProgress()) {
+    return;
+  }
+
+  JSContext* cx = rt->mainContextFromOwnThread();
 
   if (IsIncrementalGCUnsafe(rt) != AbortReason::None ||
-      TlsContext.get()->keepAtoms || rt->hasHelperThreadZones() ||
-      rt->cooperatingContexts().length() != 1) {
+      rt->hasHelperThreadZones()) {
     return;
   }
 
   number++;
 
   VerifyPreTracer* trc = js_new<VerifyPreTracer>(rt);
-  if (!trc) return;
+  if (!trc) {
+    return;
+  }
 
-  JSContext* cx = TlsContext.get();
   AutoPrepareForTracing prep(cx);
 
   {
     AutoLockGC lock(cx->runtime());
-    for (auto chunk = allNonEmptyChunks(lock); !chunk.done(); chunk.next())
+    for (auto chunk = allNonEmptyChunks(lock); !chunk.done(); chunk.next()) {
       chunk->bitmap.clear();
+    }
   }
 
   gcstats::AutoPhase ap(stats(), gcstats::PhaseKind::TRACE_HEAP);
 
   const size_t size = 64 * 1024 * 1024;
   trc->root = (VerifyNode*)js_malloc(size);
-  if (!trc->root) goto oom;
+  if (!trc->root) {
+    goto oom;
+  }
   trc->edgeptr = (char*)trc->root;
   trc->term = trc->edgeptr + size;
-
-  if (!trc->nodemap.init()) goto oom;
 
   /* Create the root node. */
   trc->curnode = MakeNode(trc, nullptr, JS::TraceKind(0));
@@ -207,11 +221,13 @@ void gc::GCRuntime::startVerifyPreBarriers() {
   incrementalState = State::MarkRoots;
 
   /* Make all the roots be edges emanating from the root node. */
-  traceRuntime(trc, prep.session());
+  traceRuntime(trc, prep);
 
   VerifyNode* node;
   node = trc->curnode;
-  if (trc->edgeptr == trc->term) goto oom;
+  if (trc->edgeptr == trc->term) {
+    goto oom;
+  }
 
   /* For each edge, make a node for it if one doesn't already exist. */
   while ((char*)node < trc->edgeptr) {
@@ -222,7 +238,9 @@ void gc::GCRuntime::startVerifyPreBarriers() {
         trc->curnode = child;
         js::TraceChildren(trc, e.thing, e.kind);
       }
-      if (trc->edgeptr == trc->term) goto oom;
+      if (trc->edgeptr == trc->term) {
+        goto oom;
+      }
     }
 
     node = NextNode(node);
@@ -250,7 +268,7 @@ static bool IsMarkedOrAllocated(TenuredCell* cell) {
   return cell->isMarkedAny();
 }
 
-struct CheckEdgeTracer : public JS::CallbackTracer {
+struct CheckEdgeTracer final : public JS::CallbackTracer {
   VerifyNode* node;
   explicit CheckEdgeTracer(JSRuntime* rt)
       : JS::CallbackTracer(rt), node(nullptr) {}
@@ -268,10 +286,14 @@ static const uint32_t MAX_VERIFIER_EDGES = 1000;
  */
 void CheckEdgeTracer::onChild(const JS::GCCellPtr& thing) {
   // Skip things in other runtimes.
-  if (thing.asCell()->asTenured().runtimeFromAnyThread() != runtime()) return;
+  if (thing.asCell()->asTenured().runtimeFromAnyThread() != runtime()) {
+    return;
+  }
 
   /* Avoid n^2 behavior. */
-  if (node->count > MAX_VERIFIER_EDGES) return;
+  if (node->count > MAX_VERIFIER_EDGES) {
+    return;
+  }
 
   for (uint32_t i = 0; i < node->count; i++) {
     if (node->edges[i].thing == thing.asCell()) {
@@ -288,17 +310,21 @@ void js::gc::AssertSafeToSkipBarrier(TenuredCell* thing) {
 }
 
 static bool IsMarkedOrAllocated(const EdgeValue& edge) {
-  if (!edge.thing || IsMarkedOrAllocated(TenuredCell::fromPointer(edge.thing)))
+  if (!edge.thing ||
+      IsMarkedOrAllocated(TenuredCell::fromPointer(edge.thing))) {
     return true;
+  }
 
   // Permanent atoms and well-known symbols aren't marked during graph
   // traversal.
   if (edge.kind == JS::TraceKind::String &&
-      static_cast<JSString*>(edge.thing)->isPermanentAtom())
+      static_cast<JSString*>(edge.thing)->isPermanentAtom()) {
     return true;
+  }
   if (edge.kind == JS::TraceKind::Symbol &&
-      static_cast<JS::Symbol*>(edge.thing)->isWellKnownSymbol())
+      static_cast<JS::Symbol*>(edge.thing)->isWellKnownSymbol()) {
     return true;
+  }
 
   return false;
 }
@@ -306,17 +332,21 @@ static bool IsMarkedOrAllocated(const EdgeValue& edge) {
 void gc::GCRuntime::endVerifyPreBarriers() {
   VerifyPreTracer* trc = verifyPreData;
 
-  if (!trc) return;
+  if (!trc) {
+    return;
+  }
 
   MOZ_ASSERT(!JS::IsGenerationalGCEnabled(rt));
 
-  AutoPrepareForTracing prep(rt->activeContextFromOwnThread());
+  AutoPrepareForTracing prep(rt->mainContextFromOwnThread());
 
   bool compartmentCreated = false;
 
   /* We need to disable barriers before tracing, which may invoke barriers. */
   for (ZonesIter zone(rt, WithAtoms); !zone.done(); zone.next()) {
-    if (!zone->needsIncrementalBarrier()) compartmentCreated = true;
+    if (!zone->needsIncrementalBarrier()) {
+      compartmentCreated = true;
+    }
 
     zone->setNeedsIncrementalBarrier(false);
   }
@@ -332,7 +362,7 @@ void gc::GCRuntime::endVerifyPreBarriers() {
   incrementalState = State::NotActive;
 
   if (!compartmentCreated && IsIncrementalGCUnsafe(rt) == AbortReason::None &&
-      !TlsContext.get()->keepAtoms && !rt->hasHelperThreadZones()) {
+      !rt->hasHelperThreadZones()) {
     CheckEdgeTracer cetrc(rt);
 
     /* Start after the roots. */
@@ -370,23 +400,32 @@ void gc::GCRuntime::endVerifyPreBarriers() {
 /*** Barrier Verifier Scheduling ***/
 
 void gc::GCRuntime::verifyPreBarriers() {
-  if (verifyPreData)
+  if (verifyPreData) {
     endVerifyPreBarriers();
-  else
+  } else {
     startVerifyPreBarriers();
+  }
 }
 
 void gc::VerifyBarriers(JSRuntime* rt, VerifierType type) {
-  if (type == PreBarrierVerifier) rt->gc.verifyPreBarriers();
+  if (type == PreBarrierVerifier) {
+    rt->gc.verifyPreBarriers();
+  }
 }
 
 void gc::GCRuntime::maybeVerifyPreBarriers(bool always) {
-  if (!hasZealMode(ZealMode::VerifierPre)) return;
+  if (!hasZealMode(ZealMode::VerifierPre)) {
+    return;
+  }
 
-  if (TlsContext.get()->suppressGC) return;
+  if (rt->mainContextFromOwnThread()->suppressGC) {
+    return;
+  }
 
   if (verifyPreData) {
-    if (++verifyPreData->count < zealFrequency && !always) return;
+    if (++verifyPreData->count < zealFrequency && !always) {
+      return;
+    }
 
     endVerifyPreBarriers();
   }
@@ -408,12 +447,28 @@ void js::gc::GCRuntime::finishVerifier() {
 
 #endif /* JS_GC_ZEAL */
 
-#if defined(JSGC_HASH_TABLE_CHECKS) || defined(DEBUG)
+#if defined(JS_GC_ZEAL) || defined(DEBUG)
+
+static const char* CellColorName(CellColor color) {
+  switch (color) {
+    case CellColor::White:
+      return "white";
+    case CellColor::Black:
+      return "black";
+    case CellColor::Gray:
+      return "gray";
+    default:
+      MOZ_CRASH("Unexpected cell color");
+  }
+}
+
+static const char* GetCellColorName(Cell* cell) {
+  return CellColorName(GetCellColor(cell));
+}
 
 class HeapCheckTracerBase : public JS::CallbackTracer {
  public:
   explicit HeapCheckTracerBase(JSRuntime* rt, WeakMapTraceKind weakTraceKind);
-  bool init();
   bool traceHeap(AutoTraceSession& session);
   virtual void checkCell(Cell* cell) = 0;
 
@@ -457,18 +512,18 @@ HeapCheckTracerBase::HeapCheckTracerBase(JSRuntime* rt,
       rt(rt),
       oom(false),
       parentIndex(-1) {
-#ifdef DEBUG
+#  ifdef DEBUG
   setCheckEdges(false);
-#endif
+#  endif
 }
-
-bool HeapCheckTracerBase::init() { return visited.init(); }
 
 void HeapCheckTracerBase::onChild(const JS::GCCellPtr& thing) {
   Cell* cell = thing.asCell();
   checkCell(cell);
 
-  if (visited.lookup(cell)) return;
+  if (visited.lookup(cell)) {
+    return;
+  }
 
   if (!visited.put(cell)) {
     oom = true;
@@ -476,27 +531,36 @@ void HeapCheckTracerBase::onChild(const JS::GCCellPtr& thing) {
   }
 
   // Don't trace into GC things owned by another runtime.
-  if (cell->runtimeFromAnyThread() != rt) return;
+  if (cell->runtimeFromAnyThread() != rt) {
+    return;
+  }
 
   // Don't trace into GC in zones being used by helper threads.
   Zone* zone;
-  if (thing.is<JSObject>())
+  if (thing.is<JSObject>()) {
     zone = thing.as<JSObject>().zone();
-  else if (thing.is<JSString>())
+  } else if (thing.is<JSString>()) {
     zone = thing.as<JSString>().zone();
-  else
+  } else {
     zone = cell->asTenured().zone();
+  }
 
-  if (zone->group() && zone->group()->usedByHelperThread()) return;
+  if (zone->usedByHelperThread()) {
+    return;
+  }
 
   WorkItem item(thing, contextName(), parentIndex);
-  if (!stack.append(item)) oom = true;
+  if (!stack.append(item)) {
+    oom = true;
+  }
 }
 
 bool HeapCheckTracerBase::traceHeap(AutoTraceSession& session) {
   // The analysis thinks that traceRuntime might GC by calling a GC callback.
   JS::AutoSuppressGCAnalysis nogc;
-  if (!rt->isBeingDestroyed()) rt->gc.traceRuntime(this, session);
+  if (!rt->isBeingDestroyed()) {
+    rt->gc.traceRuntime(this, session);
+  }
 
   while (!stack.empty() && !oom) {
     WorkItem item = stack.back();
@@ -512,21 +576,19 @@ bool HeapCheckTracerBase::traceHeap(AutoTraceSession& session) {
   return !oom;
 }
 
-static const char* GetCellColorName(Cell* cell) {
-  if (cell->isMarkedBlack()) return "black";
-  if (cell->isMarkedGray()) return "gray";
-  return "white";
-}
-
 void HeapCheckTracerBase::dumpCellInfo(Cell* cell) {
   auto kind = cell->getTraceKind();
   JSObject* obj =
       kind == JS::TraceKind::Object ? static_cast<JSObject*>(cell) : nullptr;
 
   fprintf(stderr, "%s %s", GetCellColorName(cell), GCTraceKindToAscii(kind));
-  if (obj) fprintf(stderr, " %s", obj->getClass()->name);
+  if (obj) {
+    fprintf(stderr, " %s", obj->getClass()->name);
+  }
   fprintf(stderr, " %p", cell);
-  if (obj) fprintf(stderr, " (compartment %p)", obj->compartment());
+  if (obj) {
+    fprintf(stderr, " (compartment %p)", obj->compartment());
+  }
 }
 
 void HeapCheckTracerBase::dumpCellPath() {
@@ -542,28 +604,30 @@ void HeapCheckTracerBase::dumpCellPath() {
   fprintf(stderr, "  from root %s\n", name);
 }
 
-#endif  // defined(JSGC_HASH_TABLE_CHECKS) || defined(DEBUG)
-
-#ifdef JSGC_HASH_TABLE_CHECKS
-
 class CheckHeapTracer final : public HeapCheckTracerBase {
  public:
-  explicit CheckHeapTracer(JSRuntime* rt);
+  enum GCType { Moving, NonMoving };
+
+  explicit CheckHeapTracer(JSRuntime* rt, GCType type);
   void check(AutoTraceSession& session);
 
  private:
   void checkCell(Cell* cell) override;
+  GCType gcType;
 };
 
-CheckHeapTracer::CheckHeapTracer(JSRuntime* rt)
-    : HeapCheckTracerBase(rt, TraceWeakMapKeysValues) {}
+CheckHeapTracer::CheckHeapTracer(JSRuntime* rt, GCType type)
+    : HeapCheckTracerBase(rt, TraceWeakMapKeysValues), gcType(type) {}
 
 inline static bool IsValidGCThingPointer(Cell* cell) {
   return (uintptr_t(cell) & CellAlignMask) == 0;
 }
 
 void CheckHeapTracer::checkCell(Cell* cell) {
-  if (!IsValidGCThingPointer(cell) || !IsGCThingValidAfterMovingGC(cell)) {
+  // Moving
+  if (!IsValidGCThingPointer(cell) ||
+      ((gcType == GCType::Moving) && !IsGCThingValidAfterMovingGC(cell)) ||
+      ((gcType == GCType::NonMoving) && cell->isForwarded())) {
     failures++;
     fprintf(stderr, "Bad pointer %p\n", cell);
     dumpCellPath();
@@ -571,21 +635,29 @@ void CheckHeapTracer::checkCell(Cell* cell) {
 }
 
 void CheckHeapTracer::check(AutoTraceSession& session) {
-  if (!traceHeap(session)) return;
+  if (!traceHeap(session)) {
+    return;
+  }
 
-  if (failures) fprintf(stderr, "Heap check: %zu failure(s)\n", failures);
+  if (failures) {
+    fprintf(stderr, "Heap check: %zu failure(s)\n", failures);
+  }
   MOZ_RELEASE_ASSERT(failures == 0);
 }
 
 void js::gc::CheckHeapAfterGC(JSRuntime* rt) {
-  AutoTraceSession session(rt, JS::HeapState::Tracing);
-  CheckHeapTracer tracer(rt);
-  if (tracer.init()) tracer.check(session);
+  AutoTraceSession session(rt);
+  CheckHeapTracer::GCType gcType;
+
+  if (rt->gc.nursery().isEmpty()) {
+    gcType = CheckHeapTracer::GCType::Moving;
+  } else {
+    gcType = CheckHeapTracer::GCType::NonMoving;
+  }
+
+  CheckHeapTracer tracer(rt, gcType);
+  tracer.check(session);
 }
-
-#endif /* JSGC_HASH_TABLE_CHECKS */
-
-#if defined(JS_GC_ZEAL) || defined(DEBUG)
 
 class CheckGrayMarkingTracer final : public HeapCheckTracerBase {
  public:
@@ -604,7 +676,9 @@ CheckGrayMarkingTracer::CheckGrayMarkingTracer(JSRuntime* rt)
 
 void CheckGrayMarkingTracer::checkCell(Cell* cell) {
   Cell* parent = parentCell();
-  if (!parent) return;
+  if (!parent) {
+    return;
+  }
 
   if (parent->isMarkedBlack() && cell->isMarkedGray()) {
     failures++;
@@ -614,32 +688,139 @@ void CheckGrayMarkingTracer::checkCell(Cell* cell) {
     fprintf(stderr, "\n");
     dumpCellPath();
 
-#ifdef DEBUG
+#  ifdef DEBUG
+    if (parent->is<JSObject>()) {
+      fprintf(stderr, "\nSource: ");
+      DumpObject(parent->as<JSObject>(), stderr);
+    }
     if (cell->is<JSObject>()) {
-      fprintf(stderr, "\n");
+      fprintf(stderr, "\nTarget: ");
       DumpObject(cell->as<JSObject>(), stderr);
     }
-#endif
+#  endif
   }
 }
 
 bool CheckGrayMarkingTracer::check(AutoTraceSession& session) {
-  if (!traceHeap(session)) return true;  // Ignore failure.
+  if (!traceHeap(session)) {
+    return true;  // Ignore failure.
+  }
 
   return failures == 0;
 }
 
 JS_FRIEND_API bool js::CheckGrayMarkingState(JSRuntime* rt) {
-  MOZ_ASSERT(!JS::CurrentThreadIsHeapCollecting());
+  MOZ_ASSERT(!JS::RuntimeHeapIsCollecting());
   MOZ_ASSERT(!rt->gc.isIncrementalGCInProgress());
-  if (!rt->gc.areGrayBitsValid()) return true;
+  if (!rt->gc.areGrayBitsValid()) {
+    return true;
+  }
 
   gcstats::AutoPhase ap(rt->gc.stats(), gcstats::PhaseKind::TRACE_HEAP);
-  AutoTraceSession session(rt, JS::HeapState::Tracing);
+  AutoTraceSession session(rt);
   CheckGrayMarkingTracer tracer(rt);
-  if (!tracer.init()) return true;  // Ignore failure
 
   return tracer.check(session);
+}
+
+static Zone* GetCellZoneFromAnyThread(Cell* cell) {
+  if (cell->is<JSObject>()) {
+    return cell->as<JSObject>()->zoneFromAnyThread();
+  }
+
+  if (cell->is<JSString>()) {
+    return cell->as<JSString>()->zoneFromAnyThread();
+  }
+
+  return cell->asTenured().zoneFromAnyThread();
+}
+
+static JSObject* MaybeGetDelegate(Cell* cell) {
+  if (!cell->is<JSObject>()) {
+    return nullptr;
+  }
+
+  JSObject* object = cell->as<JSObject>();
+  return js::UncheckedUnwrapWithoutExpose(object);
+}
+
+bool js::gc::CheckWeakMapEntryMarking(const WeakMapBase* map, Cell* key,
+                                      Cell* value) {
+  bool ok = true;
+
+  Zone* zone = map->zone();
+  MOZ_ASSERT(CurrentThreadCanAccessZone(zone));
+  MOZ_ASSERT(zone->isGCMarking());
+
+  JSObject* object = map->memberOf;
+  MOZ_ASSERT_IF(object, object->zone() == zone);
+
+  // Debugger weak maps can have keys in different zones.
+  Zone* keyZone = GetCellZoneFromAnyThread(key);
+  MOZ_ASSERT_IF(!map->allowKeysInOtherZones(),
+                keyZone == zone || keyZone->isAtomsZone());
+
+  Zone* valueZone = GetCellZoneFromAnyThread(value);
+  MOZ_ASSERT(valueZone == zone || valueZone->isAtomsZone());
+
+  CellColor mapColor =
+      map->markColor == MarkColor::Black ? CellColor::Black : CellColor::Gray;
+  if (object && GetCellColor(object) != mapColor) {
+    fprintf(stderr, "WeakMap object is marked differently to the map\n");
+    fprintf(stderr, "(map %p is %s, object %p is %s)\n", map,
+            CellColorName(mapColor), object,
+            CellColorName(GetCellColor(object)));
+    ok = false;
+  }
+
+  CellColor keyColor = GetCellColor(key);
+
+  // Values belonging to other runtimes or in uncollected zones are treated as
+  // black.
+  CellColor valueColor = CellColor::Black;
+  if (value->runtimeFromAnyThread() == zone->runtimeFromAnyThread() &&
+      valueZone->isGCMarking()) {
+    valueColor = GetCellColor(value);
+  }
+
+  if (valueColor < ExpectedWeakMapValueColor(mapColor, keyColor)) {
+    fprintf(stderr, "WeakMap value is less marked than map and key\n");
+    fprintf(stderr, "(map %p is %s, key %p is %s, value %p is %s)\n", map,
+            CellColorName(mapColor), key, CellColorName(keyColor), value,
+            CellColorName(valueColor));
+    ok = false;
+  }
+
+  // Debugger weak maps map have keys in zones that are not or are
+  // no longer collecting. We can't make guarantees about the mark
+  // state of these keys.
+  if (map->allowKeysInOtherZones() &&
+      !(keyZone->isGCMarking() || keyZone->isGCSweeping())) {
+    return ok;
+  }
+
+  JSObject* delegate = MaybeGetDelegate(key);
+  if (!delegate) {
+    return ok;
+  }
+
+  CellColor delegateColor;
+  if (delegate->zone()->isGCMarking() || delegate->zone()->isGCSweeping()) {
+    delegateColor = GetCellColor(delegate);
+  } else {
+    // IsMarked() assumes cells in uncollected zones are marked.
+    delegateColor = CellColor::Black;
+  }
+
+  if (keyColor < ExpectedWeakMapKeyColor(mapColor, delegateColor)) {
+    fprintf(stderr, "WeakMap key is less marked than map and delegate\n");
+    fprintf(stderr, "(map %p is %s, delegate %p is %s, key %p is %s)\n", map,
+            CellColorName(mapColor), delegate, CellColorName(delegateColor),
+            key, CellColorName(keyColor));
+    ok = false;
+  }
+
+  return ok;
 }
 
 #endif  // defined(JS_GC_ZEAL) || defined(DEBUG)

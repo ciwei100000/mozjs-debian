@@ -1,5 +1,5 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
- * vim: set ts=8 sts=4 et sw=4 tw=99:
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+ * vim: set ts=8 sts=2 et sw=2 tw=80:
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -12,8 +12,9 @@
 #include "vm/AsyncFunction.h"
 #include "vm/GlobalObject.h"
 #include "vm/Iteration.h"
-#include "vm/JSCompartment.h"
+#include "vm/JSObject.h"
 #include "vm/ProxyObject.h"
+#include "vm/Realm.h"
 #include "vm/Shape.h"
 #include "vm/Xdr.h"
 #include "wasm/WasmInstance.h"
@@ -26,7 +27,6 @@
 #include "vm/TypeInference-inl.h"
 
 using namespace js;
-using namespace js::gc;
 
 typedef Rooted<ArgumentsObject*> RootedArgumentsObject;
 typedef MutableHandle<ArgumentsObject*> MutableHandleArgumentsObject;
@@ -41,7 +41,9 @@ Shape* js::EnvironmentCoordinateToEnvironmentShape(JSScript* script,
   while (true) {
     MOZ_ASSERT(!si.done());
     if (si.hasSyntacticEnvironment()) {
-      if (!hops) break;
+      if (!hops) {
+        break;
+      }
       hops--;
     }
     si++;
@@ -49,98 +51,39 @@ Shape* js::EnvironmentCoordinateToEnvironmentShape(JSScript* script,
   return si.environmentShape();
 }
 
-static const uint32_t ENV_COORDINATE_NAME_THRESHOLD = 20;
-
-void EnvironmentCoordinateNameCache::purge() {
-  shape = nullptr;
-  if (map.initialized()) map.finish();
-}
-
-PropertyName* js::EnvironmentCoordinateName(
-    EnvironmentCoordinateNameCache& cache, JSScript* script, jsbytecode* pc) {
+PropertyName* js::EnvironmentCoordinateNameSlow(JSScript* script,
+                                                jsbytecode* pc) {
   Shape* shape = EnvironmentCoordinateToEnvironmentShape(script, pc);
-  if (shape != cache.shape && shape->slot() >= ENV_COORDINATE_NAME_THRESHOLD) {
-    cache.purge();
-    if (cache.map.init(shape->slot())) {
-      cache.shape = shape;
-      Shape::Range<NoGC> r(shape);
-      while (!r.empty()) {
-        if (!cache.map.putNew(r.front().slot(), r.front().propid())) {
-          cache.purge();
-          break;
-        }
-        r.popFront();
-      }
-    }
-  }
-
-  jsid id;
   EnvironmentCoordinate ec(pc);
-  if (shape == cache.shape) {
-    EnvironmentCoordinateNameCache::Map::Ptr p = cache.map.lookup(ec.slot());
-    id = p->value();
-  } else {
-    Shape::Range<NoGC> r(shape);
-    while (r.front().slot() != ec.slot()) r.popFront();
-    id = r.front().propidRaw();
+
+  Shape::Range<NoGC> r(shape);
+  while (r.front().slot() != ec.slot()) {
+    r.popFront();
   }
+  jsid id = r.front().propidRaw();
 
   /* Beware nameless destructuring formal. */
-  if (!JSID_IS_ATOM(id))
+  if (!JSID_IS_ATOM(id)) {
     return script->runtimeFromAnyThread()->commonNames->empty;
-  return JSID_TO_ATOM(id)->asPropertyName();
-}
-
-JSScript* js::EnvironmentCoordinateFunctionScript(JSScript* script,
-                                                  jsbytecode* pc) {
-  MOZ_ASSERT(JOF_OPTYPE(JSOp(*pc)) == JOF_ENVCOORD);
-  ScopeIter si(script->innermostScope(pc));
-  uint32_t hops = EnvironmentCoordinate(pc).hops();
-  while (true) {
-    if (si.hasSyntacticEnvironment()) {
-      if (!hops) break;
-      hops--;
-    }
-    si++;
   }
-  if (si.kind() != ScopeKind::Function) return nullptr;
-  return si.scope()->as<FunctionScope>().script();
+  return JSID_TO_ATOM(id)->asPropertyName();
 }
 
 /*****************************************************************************/
 
 CallObject* CallObject::create(JSContext* cx, HandleShape shape,
                                HandleObjectGroup group) {
-  MOZ_ASSERT(!group->singleton(),
-             "passed a singleton group to create() (use createSingleton() "
-             "instead)");
+  MOZ_ASSERT(!group->singleton());
 
   gc::AllocKind kind = gc::GetGCObjectKind(shape->numFixedSlots());
   MOZ_ASSERT(CanBeFinalizedInBackground(kind, &CallObject::class_));
   kind = gc::GetBackgroundAllocKind(kind);
 
-  JSObject* obj;
-  JS_TRY_VAR_OR_RETURN_NULL(
-      cx, obj, NativeObject::create(cx, kind, gc::DefaultHeap, shape, group));
-
-  return &obj->as<CallObject>();
-}
-
-CallObject* CallObject::createSingleton(JSContext* cx, HandleShape shape) {
-  gc::AllocKind kind = gc::GetGCObjectKind(shape->numFixedSlots());
-  MOZ_ASSERT(CanBeFinalizedInBackground(kind, &CallObject::class_));
-  kind = gc::GetBackgroundAllocKind(kind);
-
-  RootedObjectGroup group(
-      cx, ObjectGroup::lazySingletonGroup(cx, &class_, TaggedProto(nullptr)));
-  if (!group) return nullptr;
+  gc::InitialHeap heap = GetInitialHeap(GenericObject, group);
 
   JSObject* obj;
-  JS_TRY_VAR_OR_RETURN_NULL(
-      cx, obj, NativeObject::create(cx, kind, gc::TenuredHeap, shape, group));
-
-  MOZ_ASSERT(obj->isSingleton(),
-             "group created inline above must be a singleton");
+  JS_TRY_VAR_OR_RETURN_NULL(cx, obj,
+                            NativeObject::create(cx, kind, heap, shape, group));
 
   return &obj->as<CallObject>();
 }
@@ -159,11 +102,16 @@ CallObject* CallObject::createTemplateObject(JSContext* cx, HandleScript script,
 
   RootedObjectGroup group(
       cx, ObjectGroup::defaultNewGroup(cx, &class_, TaggedProto(nullptr)));
-  if (!group) return nullptr;
+  if (!group) {
+    return nullptr;
+  }
 
   gc::AllocKind kind = gc::GetGCObjectKind(shape->numFixedSlots());
   MOZ_ASSERT(CanBeFinalizedInBackground(kind, &class_));
   kind = gc::GetBackgroundAllocKind(kind);
+
+  // The JITs assume the result is nursery allocated unless we collected the
+  // nursery, so don't change |heap| here.
 
   JSObject* obj;
   JS_TRY_VAR_OR_RETURN_NULL(cx, obj,
@@ -178,8 +126,9 @@ CallObject* CallObject::createTemplateObject(JSContext* cx, HandleScript script,
     for (BindingIter bi(script->bodyScope()); bi; bi++) {
       BindingLocation loc = bi.location();
       if (loc.kind() == BindingLocation::Kind::Environment &&
-          BindingKindIsLexical(bi.kind()))
+          BindingKindIsLexical(bi.kind())) {
         callObj->initSlot(loc.slot(), MagicValue(JS_UNINITIALIZED_LEXICAL));
+      }
     }
   }
 
@@ -195,32 +144,29 @@ CallObject* CallObject::createTemplateObject(JSContext* cx, HandleScript script,
 CallObject* CallObject::create(JSContext* cx, HandleFunction callee,
                                HandleObject enclosing) {
   RootedScript script(cx, callee->nonLazyScript());
-  gc::InitialHeap heap =
-      script->treatAsRunOnce() ? gc::TenuredHeap : gc::DefaultHeap;
+  gc::InitialHeap heap = gc::DefaultHeap;
   CallObject* callobj =
       CallObject::createTemplateObject(cx, script, enclosing, heap);
-  if (!callobj) return nullptr;
+  if (!callobj) {
+    return nullptr;
+  }
 
   callobj->initFixedSlot(CALLEE_SLOT, ObjectValue(*callee));
-
-  if (script->treatAsRunOnce()) {
-    Rooted<CallObject*> ncallobj(cx, callobj);
-    if (!JSObject::setSingleton(cx, ncallobj)) return nullptr;
-    return ncallobj;
-  }
 
   return callobj;
 }
 
 CallObject* CallObject::create(JSContext* cx, AbstractFramePtr frame) {
   MOZ_ASSERT(frame.isFunctionFrame());
-  assertSameCompartment(cx, frame);
+  cx->check(frame);
 
   RootedObject envChain(cx, frame.environmentChain());
   RootedFunction callee(cx, frame.callee());
 
   CallObject* callobj = create(cx, callee, envChain);
-  if (!callobj) return nullptr;
+  if (!callobj) {
+    return nullptr;
+  }
 
   if (!frame.script()->bodyScope()->as<FunctionScope>().hasParameterExprs()) {
     // If there are no defaults, copy the aliased arguments into the call
@@ -228,7 +174,9 @@ CallObject* CallObject::create(JSContext* cx, AbstractFramePtr frame) {
     // the copying.
 
     for (PositionalFormalParameterIter fi(frame.script()); fi; fi++) {
-      if (!fi.closedOver()) continue;
+      if (!fi.closedOver()) {
+        continue;
+      }
       callobj->setAliasedBinding(
           cx, fi,
           frame.unaliasedFormal(fi.argumentSlot(), DONT_CHECK_ALIASING));
@@ -246,12 +194,18 @@ CallObject* CallObject::createHollowForDebug(JSContext* cx,
   Rooted<FunctionScope*> scope(cx, &script->bodyScope()->as<FunctionScope>());
   RootedShape shape(cx, FunctionScope::getEmptyEnvironmentShape(
                             cx, scope->hasParameterExprs()));
-  if (!shape) return nullptr;
+  if (!shape) {
+    return nullptr;
+  }
   RootedObjectGroup group(
       cx, ObjectGroup::defaultNewGroup(cx, &class_, TaggedProto(nullptr)));
-  if (!group) return nullptr;
+  if (!group) {
+    return nullptr;
+  }
   Rooted<CallObject*> callobj(cx, create(cx, shape, group));
-  if (!callobj) return nullptr;
+  if (!callobj) {
+    return nullptr;
+  }
 
   // This environment's enclosing link is never used: the
   // DebugEnvironmentProxy that refers to this scope carries its own
@@ -264,30 +218,42 @@ CallObject* CallObject::createHollowForDebug(JSContext* cx,
   RootedId id(cx);
   for (Rooted<BindingIter> bi(cx, BindingIter(script)); bi; bi++) {
     id = NameToId(bi.name()->asPropertyName());
-    if (!SetProperty(cx, callobj, id, optimizedOut)) return nullptr;
+    if (!SetProperty(cx, callobj, id, optimizedOut)) {
+      return nullptr;
+    }
   }
 
   return callobj;
 }
 
 const Class CallObject::class_ = {
-    "Call", JSCLASS_IS_ANONYMOUS |
-                JSCLASS_HAS_RESERVED_SLOTS(CallObject::RESERVED_SLOTS)};
+    "Call", JSCLASS_HAS_RESERVED_SLOTS(CallObject::RESERVED_SLOTS)};
 
 /*****************************************************************************/
 
-/* static */ VarEnvironmentObject* VarEnvironmentObject::create(
-    JSContext* cx, HandleShape shape, HandleObject enclosing,
-    gc::InitialHeap heap) {
+/* static */
+VarEnvironmentObject* VarEnvironmentObject::create(JSContext* cx,
+                                                   HandleShape shape,
+                                                   HandleObject enclosing,
+                                                   gc::InitialHeap heap) {
   MOZ_ASSERT(shape->getObjectClass() == &class_);
 
   RootedObjectGroup group(
       cx, ObjectGroup::defaultNewGroup(cx, &class_, TaggedProto(nullptr)));
-  if (!group) return nullptr;
+  if (!group) {
+    return nullptr;
+  }
 
   gc::AllocKind kind = gc::GetGCObjectKind(shape->numFixedSlots());
   MOZ_ASSERT(CanBeFinalizedInBackground(kind, &class_));
   kind = gc::GetBackgroundAllocKind(kind);
+
+  {
+    AutoSweepObjectGroup sweep(group);
+    if (group->shouldPreTenure(sweep)) {
+      heap = gc::TenuredHeap;
+    }
+  }
 
   JSObject* obj;
   JS_TRY_VAR_OR_RETURN_NULL(cx, obj,
@@ -302,8 +268,10 @@ const Class CallObject::class_ = {
   return env;
 }
 
-/* static */ VarEnvironmentObject* VarEnvironmentObject::create(
-    JSContext* cx, HandleScope scope, AbstractFramePtr frame) {
+/* static */
+VarEnvironmentObject* VarEnvironmentObject::create(JSContext* cx,
+                                                   HandleScope scope,
+                                                   AbstractFramePtr frame) {
 #ifdef DEBUG
   if (frame.isEvalFrame()) {
     MOZ_ASSERT(scope->is<EvalScope>() && scope == frame.script()->bodyScope());
@@ -321,21 +289,24 @@ const Class CallObject::class_ = {
 
   RootedScript script(cx, frame.script());
   RootedObject envChain(cx, frame.environmentChain());
-  gc::InitialHeap heap =
-      script->treatAsRunOnce() ? gc::TenuredHeap : gc::DefaultHeap;
   RootedShape shape(cx, scope->environmentShape());
-  VarEnvironmentObject* env = create(cx, shape, envChain, heap);
-  if (!env) return nullptr;
+  VarEnvironmentObject* env = create(cx, shape, envChain, gc::DefaultHeap);
+  if (!env) {
+    return nullptr;
+  }
   env->initScope(scope);
   return env;
 }
 
-/* static */ VarEnvironmentObject* VarEnvironmentObject::createHollowForDebug(
+/* static */
+VarEnvironmentObject* VarEnvironmentObject::createHollowForDebug(
     JSContext* cx, Handle<VarScope*> scope) {
   MOZ_ASSERT(!scope->hasEnvironment());
 
   RootedShape shape(cx, VarScope::getEmptyEnvironmentShape(cx));
-  if (!shape) return nullptr;
+  if (!shape) {
+    return nullptr;
+  }
 
   // This environment's enclosing link is never used: the
   // DebugEnvironmentProxy that refers to this scope carries its own
@@ -344,13 +315,17 @@ const Class CallObject::class_ = {
   RootedObject enclosingEnv(cx, &cx->global()->lexicalEnvironment());
   Rooted<VarEnvironmentObject*> env(
       cx, create(cx, shape, enclosingEnv, gc::TenuredHeap));
-  if (!env) return nullptr;
+  if (!env) {
+    return nullptr;
+  }
 
   RootedValue optimizedOut(cx, MagicValue(JS_OPTIMIZED_OUT));
   RootedId id(cx);
   for (Rooted<BindingIter> bi(cx, BindingIter(scope)); bi; bi++) {
     id = NameToId(bi.name()->asPropertyName());
-    if (!SetProperty(cx, env, id, optimizedOut)) return nullptr;
+    if (!SetProperty(cx, env, id, optimizedOut)) {
+      return nullptr;
+    }
   }
 
   env->initScope(scope);
@@ -358,8 +333,7 @@ const Class CallObject::class_ = {
 }
 
 const Class VarEnvironmentObject::class_ = {
-    "Var", JSCLASS_IS_ANONYMOUS | JSCLASS_HAS_RESERVED_SLOTS(
-                                      VarEnvironmentObject::RESERVED_SLOTS)};
+    "Var", JSCLASS_HAS_RESERVED_SLOTS(VarEnvironmentObject::RESERVED_SLOTS)};
 
 /*****************************************************************************/
 
@@ -382,14 +356,14 @@ const ClassOps ModuleEnvironmentObject::classOps_ = {
 
 const Class ModuleEnvironmentObject::class_ = {
     "ModuleEnvironmentObject",
-    JSCLASS_HAS_RESERVED_SLOTS(ModuleEnvironmentObject::RESERVED_SLOTS) |
-        JSCLASS_IS_ANONYMOUS,
+    JSCLASS_HAS_RESERVED_SLOTS(ModuleEnvironmentObject::RESERVED_SLOTS),
     &ModuleEnvironmentObject::classOps_,
     JS_NULL_CLASS_SPEC,
     JS_NULL_CLASS_EXT,
     &ModuleEnvironmentObject::objectOps_};
 
-/* static */ ModuleEnvironmentObject* ModuleEnvironmentObject::create(
+/* static */
+ModuleEnvironmentObject* ModuleEnvironmentObject::create(
     JSContext* cx, HandleModuleObject module) {
   RootedScript script(cx, module->script());
   RootedShape shape(cx,
@@ -398,7 +372,9 @@ const Class ModuleEnvironmentObject::class_ = {
 
   RootedObjectGroup group(
       cx, ObjectGroup::defaultNewGroup(cx, &class_, TaggedProto(nullptr)));
-  if (!group) return nullptr;
+  if (!group) {
+    return nullptr;
+  }
 
   gc::AllocKind kind = gc::GetGCObjectKind(shape->numFixedSlots());
   MOZ_ASSERT(CanBeFinalizedInBackground(kind, &class_));
@@ -406,12 +382,11 @@ const Class ModuleEnvironmentObject::class_ = {
 
   JSObject* obj;
   JS_TRY_VAR_OR_RETURN_NULL(
-      cx, obj, NativeObject::create(cx, kind, TenuredHeap, shape, group));
+      cx, obj, NativeObject::create(cx, kind, gc::TenuredHeap, shape, group));
 
   RootedModuleEnvironmentObject env(cx, &obj->as<ModuleEnvironmentObject>());
 
   env->initReservedSlot(MODULE_SLOT, ObjectValue(*module));
-  if (!JSObject::setSingleton(cx, env)) return nullptr;
 
   // Initialize this early so that we can manipulate the env object without
   // causing assertions.
@@ -422,15 +397,17 @@ const Class ModuleEnvironmentObject::class_ = {
   for (BindingIter bi(script); bi; bi++) {
     BindingLocation loc = bi.location();
     if (loc.kind() == BindingLocation::Kind::Environment &&
-        BindingKindIsLexical(bi.kind()))
+        BindingKindIsLexical(bi.kind())) {
       env->initSlot(loc.slot(), MagicValue(JS_UNINITIALIZED_LEXICAL));
+    }
   }
 
-    // It is not be possible to add or remove bindings from a module environment
-    // after this point as module code is always strict.
+  // It is not be possible to add or remove bindings from a module environment
+  // after this point as module code is always strict.
 #ifdef DEBUG
-  for (Shape::Range<NoGC> r(env->lastProperty()); !r.empty(); r.popFront())
+  for (Shape::Range<NoGC> r(env->lastProperty()); !r.empty(); r.popFront()) {
     MOZ_ASSERT(!r.front().configurable());
+  }
   MOZ_ASSERT(env->lastProperty()->getObjectFlags() & BaseShape::NOT_EXTENSIBLE);
   MOZ_ASSERT(!env->inDictionaryMode());
 #endif
@@ -438,11 +415,11 @@ const Class ModuleEnvironmentObject::class_ = {
   return env;
 }
 
-ModuleObject& ModuleEnvironmentObject::module() {
+ModuleObject& ModuleEnvironmentObject::module() const {
   return getReservedSlot(MODULE_SLOT).toObject().as<ModuleObject>();
 }
 
-IndirectBindingMap& ModuleEnvironmentObject::importBindings() {
+IndirectBindingMap& ModuleEnvironmentObject::importBindings() const {
   return module().importBindings();
 }
 
@@ -453,7 +430,9 @@ bool ModuleEnvironmentObject::createImportBinding(JSContext* cx,
   RootedId importNameId(cx, AtomToId(importName));
   RootedId localNameId(cx, AtomToId(localName));
   RootedModuleEnvironmentObject env(cx, &module->initialEnvironment());
-  if (!importBindings().put(cx, importNameId, env, localNameId)) return false;
+  if (!importBindings().put(cx, importNameId, env, localNameId)) {
+    return false;
+  }
 
   return true;
 }
@@ -468,12 +447,13 @@ bool ModuleEnvironmentObject::lookupImport(jsid name,
   return importBindings().lookup(name, envOut, shapeOut);
 }
 
-void ModuleEnvironmentObject::fixEnclosingEnvironmentAfterCompartmentMerge(
+void ModuleEnvironmentObject::fixEnclosingEnvironmentAfterRealmMerge(
     GlobalObject& global) {
   setEnclosingEnvironment(&global.lexicalEnvironment());
 }
 
-/* static */ bool ModuleEnvironmentObject::lookupProperty(
+/* static */
+bool ModuleEnvironmentObject::lookupProperty(
     JSContext* cx, HandleObject obj, HandleId id, MutableHandleObject objp,
     MutableHandle<PropertyResult> propp) {
   const IndirectBindingMap& bindings =
@@ -487,16 +467,17 @@ void ModuleEnvironmentObject::fixEnclosingEnvironmentAfterCompartmentMerge(
   }
 
   RootedNativeObject target(cx, &obj->as<NativeObject>());
-  if (!NativeLookupOwnProperty<CanGC>(cx, target, id, propp)) return false;
+  if (!NativeLookupOwnProperty<CanGC>(cx, target, id, propp)) {
+    return false;
+  }
 
   objp.set(obj);
   return true;
 }
 
-/* static */ bool ModuleEnvironmentObject::hasProperty(JSContext* cx,
-                                                       HandleObject obj,
-                                                       HandleId id,
-                                                       bool* foundp) {
+/* static */
+bool ModuleEnvironmentObject::hasProperty(JSContext* cx, HandleObject obj,
+                                          HandleId id, bool* foundp) {
   if (obj->as<ModuleEnvironmentObject>().importBindings().has(id)) {
     *foundp = true;
     return true;
@@ -506,11 +487,10 @@ void ModuleEnvironmentObject::fixEnclosingEnvironmentAfterCompartmentMerge(
   return NativeHasProperty(cx, self, id, foundp);
 }
 
-/* static */ bool ModuleEnvironmentObject::getProperty(JSContext* cx,
-                                                       HandleObject obj,
-                                                       HandleValue receiver,
-                                                       HandleId id,
-                                                       MutableHandleValue vp) {
+/* static */
+bool ModuleEnvironmentObject::getProperty(JSContext* cx, HandleObject obj,
+                                          HandleValue receiver, HandleId id,
+                                          MutableHandleValue vp) {
   const IndirectBindingMap& bindings =
       obj->as<ModuleEnvironmentObject>().importBindings();
   Shape* shape;
@@ -524,16 +504,21 @@ void ModuleEnvironmentObject::fixEnclosingEnvironmentAfterCompartmentMerge(
   return NativeGetProperty(cx, self, receiver, id, vp);
 }
 
-/* static */ bool ModuleEnvironmentObject::setProperty(
-    JSContext* cx, HandleObject obj, HandleId id, HandleValue v,
-    HandleValue receiver, JS::ObjectOpResult& result) {
+/* static */
+bool ModuleEnvironmentObject::setProperty(JSContext* cx, HandleObject obj,
+                                          HandleId id, HandleValue v,
+                                          HandleValue receiver,
+                                          JS::ObjectOpResult& result) {
   RootedModuleEnvironmentObject self(cx, &obj->as<ModuleEnvironmentObject>());
-  if (self->importBindings().has(id)) return result.failReadOnly();
+  if (self->importBindings().has(id)) {
+    return result.failReadOnly();
+  }
 
   return NativeSetProperty<Qualified>(cx, self, id, v, receiver, result);
 }
 
-/* static */ bool ModuleEnvironmentObject::getOwnPropertyDescriptor(
+/* static */
+bool ModuleEnvironmentObject::getOwnPropertyDescriptor(
     JSContext* cx, HandleObject obj, HandleId id,
     MutableHandle<PropertyDescriptor> desc) {
   const IndirectBindingMap& bindings =
@@ -553,14 +538,17 @@ void ModuleEnvironmentObject::fixEnclosingEnvironmentAfterCompartmentMerge(
   return NativeGetOwnPropertyDescriptor(cx, self, id, desc);
 }
 
-/* static */ bool ModuleEnvironmentObject::deleteProperty(
-    JSContext* cx, HandleObject obj, HandleId id, ObjectOpResult& result) {
+/* static */
+bool ModuleEnvironmentObject::deleteProperty(JSContext* cx, HandleObject obj,
+                                             HandleId id,
+                                             ObjectOpResult& result) {
   return result.failCantDelete();
 }
 
-/* static */ bool ModuleEnvironmentObject::newEnumerate(
-    JSContext* cx, HandleObject obj, AutoIdVector& properties,
-    bool enumerableOnly) {
+/* static */
+bool ModuleEnvironmentObject::newEnumerate(JSContext* cx, HandleObject obj,
+                                           MutableHandleIdVector properties,
+                                           bool enumerableOnly) {
   RootedModuleEnvironmentObject self(cx, &obj->as<ModuleEnvironmentObject>());
   const IndirectBindingMap& bs(self->importBindings());
 
@@ -573,8 +561,9 @@ void ModuleEnvironmentObject::fixEnclosingEnvironmentAfterCompartmentMerge(
 
   bs.forEachExportedName([&](jsid name) { properties.infallibleAppend(name); });
 
-  for (Shape::Range<NoGC> r(self->lastProperty()); !r.empty(); r.popFront())
+  for (Shape::Range<NoGC> r(self->lastProperty()); !r.empty(); r.popFront()) {
     properties.infallibleAppend(r.front().propid());
+  }
 
   MOZ_ASSERT(properties.length() == count);
   return true;
@@ -584,18 +573,22 @@ void ModuleEnvironmentObject::fixEnclosingEnvironmentAfterCompartmentMerge(
 
 const Class WasmInstanceEnvironmentObject::class_ = {
     "WasmInstance",
-    JSCLASS_IS_ANONYMOUS | JSCLASS_HAS_RESERVED_SLOTS(
-                               WasmInstanceEnvironmentObject::RESERVED_SLOTS)};
+    JSCLASS_HAS_RESERVED_SLOTS(WasmInstanceEnvironmentObject::RESERVED_SLOTS)};
 
-/* static */ WasmInstanceEnvironmentObject*
+/* static */
+WasmInstanceEnvironmentObject*
 WasmInstanceEnvironmentObject::createHollowForDebug(
     JSContext* cx, Handle<WasmInstanceScope*> scope) {
   RootedObjectGroup group(
       cx, ObjectGroup::defaultNewGroup(cx, &class_, TaggedProto(nullptr)));
-  if (!group) return nullptr;
+  if (!group) {
+    return nullptr;
+  }
 
   RootedShape shape(cx, scope->getEmptyEnvironmentShape(cx));
-  if (!shape) return nullptr;
+  if (!shape) {
+    return nullptr;
+  }
 
   gc::AllocKind kind = gc::GetGCObjectKind(shape->numFixedSlots());
   MOZ_ASSERT(CanBeFinalizedInBackground(kind, &class_));
@@ -617,19 +610,21 @@ WasmInstanceEnvironmentObject::createHollowForDebug(
 
 const Class WasmFunctionCallObject::class_ = {
     "WasmCall",
-    JSCLASS_IS_ANONYMOUS |
-        JSCLASS_HAS_RESERVED_SLOTS(WasmFunctionCallObject::RESERVED_SLOTS)};
+    JSCLASS_HAS_RESERVED_SLOTS(WasmFunctionCallObject::RESERVED_SLOTS)};
 
-/* static */ WasmFunctionCallObject*
-WasmFunctionCallObject::createHollowForDebug(JSContext* cx,
-                                             HandleObject enclosing,
-                                             Handle<WasmFunctionScope*> scope) {
+/* static */
+WasmFunctionCallObject* WasmFunctionCallObject::createHollowForDebug(
+    JSContext* cx, HandleObject enclosing, Handle<WasmFunctionScope*> scope) {
   RootedObjectGroup group(
       cx, ObjectGroup::defaultNewGroup(cx, &class_, TaggedProto(nullptr)));
-  if (!group) return nullptr;
+  if (!group) {
+    return nullptr;
+  }
 
   RootedShape shape(cx, scope->getEmptyEnvironmentShape(cx));
-  if (!shape) return nullptr;
+  if (!shape) {
+    return nullptr;
+  }
 
   gc::AllocKind kind = gc::GetGCObjectKind(shape->numFixedSlots());
   MOZ_ASSERT(CanBeFinalizedInBackground(kind, &class_));
@@ -656,17 +651,20 @@ WithEnvironmentObject* WithEnvironmentObject::create(JSContext* cx,
   Rooted<WithEnvironmentObject*> obj(cx);
   obj = NewObjectWithNullTaggedProto<WithEnvironmentObject>(
       cx, GenericObject, BaseShape::DELEGATE);
-  if (!obj) return nullptr;
+  if (!obj) {
+    return nullptr;
+  }
 
   Value thisv = GetThisValue(object);
 
   obj->initEnclosingEnvironment(enclosing);
   obj->initReservedSlot(OBJECT_SLOT, ObjectValue(*object));
   obj->initReservedSlot(THIS_SLOT, thisv);
-  if (scope)
+  if (scope) {
     obj->initReservedSlot(SCOPE_SLOT, PrivateGCThingValue(scope));
-  else
+  } else {
     obj->initReservedSlot(SCOPE_SLOT, NullValue());
+  }
 
   return obj;
 }
@@ -688,10 +686,14 @@ static bool CheckUnscopables(JSContext* cx, HandleObject obj, HandleId id,
       cx,
       SYMBOL_TO_JSID(cx->wellKnownSymbols().get(JS::SymbolCode::unscopables)));
   RootedValue v(cx);
-  if (!GetProperty(cx, obj, obj, unscopablesId, &v)) return false;
+  if (!GetProperty(cx, obj, obj, unscopablesId, &v)) {
+    return false;
+  }
   if (v.isObject()) {
     RootedObject unscopablesObj(cx, &v.toObject());
-    if (!GetProperty(cx, unscopablesObj, unscopablesObj, id, &v)) return false;
+    if (!GetProperty(cx, unscopablesObj, unscopablesObj, id, &v)) {
+      return false;
+    }
     *scopable = !ToBoolean(v);
   } else {
     *scopable = true;
@@ -711,11 +713,15 @@ static bool with_LookupProperty(JSContext* cx, HandleObject obj, HandleId id,
   }
 
   RootedObject actual(cx, &obj->as<WithEnvironmentObject>().object());
-  if (!LookupProperty(cx, actual, id, objp, propp)) return false;
+  if (!LookupProperty(cx, actual, id, objp, propp)) {
+    return false;
+  }
 
   if (propp) {
     bool scopable;
-    if (!CheckUnscopables(cx, actual, id, &scopable)) return false;
+    if (!CheckUnscopables(cx, actual, id, &scopable)) {
+      return false;
+    }
     if (!scopable) {
       objp.set(nullptr);
       propp.setNotFound();
@@ -738,8 +744,12 @@ static bool with_HasProperty(JSContext* cx, HandleObject obj, HandleId id,
   RootedObject actual(cx, &obj->as<WithEnvironmentObject>().object());
 
   // ES 8.1.1.2.1 step 3-5.
-  if (!HasProperty(cx, actual, id, foundp)) return false;
-  if (!*foundp) return true;
+  if (!HasProperty(cx, actual, id, foundp)) {
+    return false;
+  }
+  if (!*foundp) {
+    return true;
+  }
 
   // Steps 7-10. (Step 6 is a no-op.)
   return CheckUnscopables(cx, actual, id, foundp);
@@ -751,8 +761,9 @@ static bool with_GetProperty(JSContext* cx, HandleObject obj,
   MOZ_ASSERT(!IsUnscopableDotName(cx, id));
   RootedObject actual(cx, &obj->as<WithEnvironmentObject>().object());
   RootedValue actualReceiver(cx, receiver);
-  if (receiver.isObject() && &receiver.toObject() == obj)
+  if (receiver.isObject() && &receiver.toObject() == obj) {
     actualReceiver.setObject(*actual);
+  }
   return GetProperty(cx, actual, actualReceiver, id, vp);
 }
 
@@ -762,8 +773,9 @@ static bool with_SetProperty(JSContext* cx, HandleObject obj, HandleId id,
   MOZ_ASSERT(!IsUnscopableDotName(cx, id));
   RootedObject actual(cx, &obj->as<WithEnvironmentObject>().object());
   RootedValue actualReceiver(cx, receiver);
-  if (receiver.isObject() && &receiver.toObject() == obj)
+  if (receiver.isObject() && &receiver.toObject() == obj) {
     actualReceiver.setObject(*actual);
+  }
   return SetProperty(cx, actual, id, v, actualReceiver, result);
 }
 
@@ -796,22 +808,26 @@ static const ObjectOps WithEnvironmentObjectOps = {
 
 const Class WithEnvironmentObject::class_ = {
     "With",
-    JSCLASS_HAS_RESERVED_SLOTS(WithEnvironmentObject::RESERVED_SLOTS) |
-        JSCLASS_IS_ANONYMOUS,
+    JSCLASS_HAS_RESERVED_SLOTS(WithEnvironmentObject::RESERVED_SLOTS),
     JS_NULL_CLASS_OPS,
     JS_NULL_CLASS_SPEC,
     JS_NULL_CLASS_EXT,
     &WithEnvironmentObjectOps};
 
-/* static */ NonSyntacticVariablesObject* NonSyntacticVariablesObject::create(
+/* static */
+NonSyntacticVariablesObject* NonSyntacticVariablesObject::create(
     JSContext* cx) {
   Rooted<NonSyntacticVariablesObject*> obj(
       cx, NewObjectWithNullTaggedProto<NonSyntacticVariablesObject>(
               cx, TenuredObject, BaseShape::DELEGATE));
-  if (!obj) return nullptr;
+  if (!obj) {
+    return nullptr;
+  }
 
   MOZ_ASSERT(obj->isUnqualifiedVarObj());
-  if (!JSObject::setQualifiedVarObj(cx, obj)) return nullptr;
+  if (!JSObject::setQualifiedVarObj(cx, obj)) {
+    return nullptr;
+  }
 
   obj->initEnclosingEnvironment(&cx->global()->lexicalEnvironment());
   return obj;
@@ -819,21 +835,71 @@ const Class WithEnvironmentObject::class_ = {
 
 const Class NonSyntacticVariablesObject::class_ = {
     "NonSyntacticVariablesObject",
-    JSCLASS_HAS_RESERVED_SLOTS(NonSyntacticVariablesObject::RESERVED_SLOTS) |
-        JSCLASS_IS_ANONYMOUS};
+    JSCLASS_HAS_RESERVED_SLOTS(NonSyntacticVariablesObject::RESERVED_SLOTS)};
+
+bool js::CreateNonSyntacticEnvironmentChain(JSContext* cx,
+                                            HandleObjectVector envChain,
+                                            MutableHandleObject env,
+                                            MutableHandleScope scope) {
+  RootedObject globalLexical(cx, &cx->global()->lexicalEnvironment());
+  if (!CreateObjectsForEnvironmentChain(cx, envChain, globalLexical, env)) {
+    return false;
+  }
+
+  if (!envChain.empty()) {
+    scope.set(GlobalScope::createEmpty(cx, ScopeKind::NonSyntactic));
+    if (!scope) {
+      return false;
+    }
+
+    // The XPConnect subscript loader, which may pass in its own
+    // environments to load scripts in, expects the environment chain to
+    // be the holder of "var" declarations. In SpiderMonkey, such objects
+    // are called "qualified varobjs", the "qualified" part meaning the
+    // declaration was qualified by "var". There is only sadness.
+    //
+    // See JSObject::isQualifiedVarObj.
+    if (!JSObject::setQualifiedVarObj(cx, env)) {
+      return false;
+    }
+
+    // Also get a non-syntactic lexical environment to capture 'let' and
+    // 'const' bindings. To persist lexical bindings, we have a 1-1
+    // mapping with the final unwrapped environment object (the
+    // environment that stores the 'var' bindings) and the lexical
+    // environment.
+    //
+    // TODOshu: disallow the subscript loader from using non-distinguished
+    // objects as dynamic scopes.
+    env.set(ObjectRealm::get(env).getOrCreateNonSyntacticLexicalEnvironment(
+        cx, env));
+    if (!env) {
+      return false;
+    }
+  } else {
+    scope.set(&cx->global()->emptyGlobalScope());
+  }
+
+  return true;
+}
 
 /*****************************************************************************/
 
-/* static */ LexicalEnvironmentObject*
-LexicalEnvironmentObject::createTemplateObject(JSContext* cx, HandleShape shape,
-                                               HandleObject enclosing,
-                                               gc::InitialHeap heap) {
+/* static */
+LexicalEnvironmentObject* LexicalEnvironmentObject::createTemplateObject(
+    JSContext* cx, HandleShape shape, HandleObject enclosing,
+    gc::InitialHeap heap) {
   MOZ_ASSERT(shape->getObjectClass() == &LexicalEnvironmentObject::class_);
 
   RootedObjectGroup group(
       cx, ObjectGroup::defaultNewGroup(cx, &LexicalEnvironmentObject::class_,
                                        TaggedProto(nullptr)));
-  if (!group) return nullptr;
+  if (!group) {
+    return nullptr;
+  }
+
+  // The JITs assume the result is nursery allocated unless we collected the
+  // nursery, so don't change |heap| here.
 
   gc::AllocKind allocKind = gc::GetGCObjectKind(shape->numFixedSlots());
   MOZ_ASSERT(
@@ -848,83 +914,102 @@ LexicalEnvironmentObject::createTemplateObject(JSContext* cx, HandleShape shape,
   MOZ_ASSERT(!env->inDictionaryMode());
   MOZ_ASSERT(env->isDelegate());
 
-  if (enclosing) env->initEnclosingEnvironment(enclosing);
+  if (enclosing) {
+    env->initEnclosingEnvironment(enclosing);
+  }
 
   return env;
 }
 
-/* static */ LexicalEnvironmentObject* LexicalEnvironmentObject::create(
+/* static */
+LexicalEnvironmentObject* LexicalEnvironmentObject::create(
     JSContext* cx, Handle<LexicalScope*> scope, HandleObject enclosing,
     gc::InitialHeap heap) {
-  assertSameCompartment(cx, enclosing);
+  cx->check(enclosing);
   MOZ_ASSERT(scope->hasEnvironment());
 
   RootedShape shape(cx, scope->environmentShape());
   LexicalEnvironmentObject* env =
       createTemplateObject(cx, shape, enclosing, heap);
-  if (!env) return nullptr;
+  if (!env) {
+    return nullptr;
+  }
 
   // All lexical bindings start off uninitialized for TDZ.
   uint32_t lastSlot = shape->slot();
   MOZ_ASSERT(lastSlot == env->lastProperty()->slot());
-  for (uint32_t slot = JSSLOT_FREE(&class_); slot <= lastSlot; slot++)
+  for (uint32_t slot = JSSLOT_FREE(&class_); slot <= lastSlot; slot++) {
     env->initSlot(slot, MagicValue(JS_UNINITIALIZED_LEXICAL));
+  }
 
   env->initScopeUnchecked(scope);
   return env;
 }
 
-/* static */ LexicalEnvironmentObject* LexicalEnvironmentObject::create(
+/* static */
+LexicalEnvironmentObject* LexicalEnvironmentObject::createForFrame(
     JSContext* cx, Handle<LexicalScope*> scope, AbstractFramePtr frame) {
   RootedObject enclosing(cx, frame.environmentChain());
   return create(cx, scope, enclosing, gc::DefaultHeap);
 }
 
-/* static */ LexicalEnvironmentObject* LexicalEnvironmentObject::createGlobal(
+/* static */
+LexicalEnvironmentObject* LexicalEnvironmentObject::createGlobal(
     JSContext* cx, Handle<GlobalObject*> global) {
   MOZ_ASSERT(global);
 
   RootedShape shape(cx, LexicalScope::getEmptyExtensibleEnvironmentShape(cx));
-  if (!shape) return nullptr;
+  if (!shape) {
+    return nullptr;
+  }
 
   Rooted<LexicalEnvironmentObject*> env(
       cx, LexicalEnvironmentObject::createTemplateObject(cx, shape, global,
                                                          gc::TenuredHeap));
-  if (!env) return nullptr;
+  if (!env) {
+    return nullptr;
+  }
 
-  if (!JSObject::setSingleton(cx, env)) return nullptr;
+  if (!JSObject::setSingleton(cx, env)) {
+    return nullptr;
+  }
 
   env->initThisValue(global);
   return env;
 }
 
-/* static */ LexicalEnvironmentObject*
-LexicalEnvironmentObject::createNonSyntactic(JSContext* cx,
-                                             HandleObject enclosing,
-                                             HandleObject thisv) {
+/* static */
+LexicalEnvironmentObject* LexicalEnvironmentObject::createNonSyntactic(
+    JSContext* cx, HandleObject enclosing, HandleObject thisv) {
   MOZ_ASSERT(enclosing);
   MOZ_ASSERT(!IsSyntacticEnvironment(enclosing));
 
   RootedShape shape(cx, LexicalScope::getEmptyExtensibleEnvironmentShape(cx));
-  if (!shape) return nullptr;
+  if (!shape) {
+    return nullptr;
+  }
 
   LexicalEnvironmentObject* env =
       LexicalEnvironmentObject::createTemplateObject(cx, shape, enclosing,
                                                      gc::TenuredHeap);
-  if (!env) return nullptr;
+  if (!env) {
+    return nullptr;
+  }
 
   env->initThisValue(thisv);
 
   return env;
 }
 
-/* static */ LexicalEnvironmentObject*
-LexicalEnvironmentObject::createHollowForDebug(JSContext* cx,
-                                               Handle<LexicalScope*> scope) {
+/* static */
+LexicalEnvironmentObject* LexicalEnvironmentObject::createHollowForDebug(
+    JSContext* cx, Handle<LexicalScope*> scope) {
   MOZ_ASSERT(!scope->hasEnvironment());
 
   RootedShape shape(cx, LexicalScope::getEmptyExtensibleEnvironmentShape(cx));
-  if (!shape) return nullptr;
+  if (!shape) {
+    return nullptr;
+  }
 
   // This environment's enclosing link is never used: the
   // DebugEnvironmentProxy that refers to this scope carries its own
@@ -933,41 +1018,51 @@ LexicalEnvironmentObject::createHollowForDebug(JSContext* cx,
   RootedObject enclosingEnv(cx, &cx->global()->lexicalEnvironment());
   Rooted<LexicalEnvironmentObject*> env(
       cx, createTemplateObject(cx, shape, enclosingEnv, gc::TenuredHeap));
-  if (!env) return nullptr;
+  if (!env) {
+    return nullptr;
+  }
 
   RootedValue optimizedOut(cx, MagicValue(JS_OPTIMIZED_OUT));
   RootedId id(cx);
   for (Rooted<BindingIter> bi(cx, BindingIter(scope)); bi; bi++) {
     id = NameToId(bi.name()->asPropertyName());
-    if (!SetProperty(cx, env, id, optimizedOut)) return nullptr;
+    if (!SetProperty(cx, env, id, optimizedOut)) {
+      return nullptr;
+    }
   }
 
   if (!JSObject::setFlags(cx, env, BaseShape::NOT_EXTENSIBLE,
-                          JSObject::GENERATE_SHAPE))
+                          JSObject::GENERATE_SHAPE)) {
     return nullptr;
+  }
 
   env->initScopeUnchecked(scope);
   return env;
 }
 
-/* static */ LexicalEnvironmentObject* LexicalEnvironmentObject::clone(
+/* static */
+LexicalEnvironmentObject* LexicalEnvironmentObject::clone(
     JSContext* cx, Handle<LexicalEnvironmentObject*> env) {
   Rooted<LexicalScope*> scope(cx, &env->scope());
   RootedObject enclosing(cx, &env->enclosingEnvironment());
   Rooted<LexicalEnvironmentObject*> copy(
       cx, create(cx, scope, enclosing, gc::DefaultHeap));
-  if (!copy) return nullptr;
+  if (!copy) {
+    return nullptr;
+  }
 
   // We can't assert that the clone has the same shape, because it could
   // have been reshaped by ReshapeForShadowedProp.
   MOZ_ASSERT(env->slotSpan() == copy->slotSpan());
-  for (uint32_t i = JSSLOT_FREE(&class_); i < copy->slotSpan(); i++)
+  for (uint32_t i = JSSLOT_FREE(&class_); i < copy->slotSpan(); i++) {
     copy->setSlot(i, env->getSlot(i));
+  }
 
   return copy;
 }
 
-/* static */ LexicalEnvironmentObject* LexicalEnvironmentObject::recreate(
+/* static */
+LexicalEnvironmentObject* LexicalEnvironmentObject::recreate(
     JSContext* cx, Handle<LexicalEnvironmentObject*> env) {
   Rooted<LexicalScope*> scope(cx, &env->scope());
   RootedObject enclosing(cx, &env->enclosingEnvironment());
@@ -975,35 +1070,40 @@ LexicalEnvironmentObject::createHollowForDebug(JSContext* cx,
 }
 
 bool LexicalEnvironmentObject::isExtensible() const {
-  return nonProxyIsExtensible();
+  return NativeObject::isExtensible();
 }
 
 Value LexicalEnvironmentObject::thisValue() const {
   MOZ_ASSERT(isExtensible());
   Value v = getReservedSlot(THIS_VALUE_OR_SCOPE_SLOT);
-  if (v.isObject()) {
-    // A WindowProxy may have been attached after this environment was
-    // created so check ToWindowProxyIfWindow again. For example,
-    // GlobalObject::createInternal will construct its lexical environment
-    // before SetWindowProxy can be called.
-    // See also: js::GetThisValue / js::GetThisValueOfLexical
-    return ObjectValue(*ToWindowProxyIfWindow(&v.toObject()));
-  }
+
+  // Windows must never be exposed to script. setWindowProxyThisValue should
+  // have set this to the WindowProxy.
+  MOZ_ASSERT_IF(v.isObject(), !IsWindow(&v.toObject()));
+
   return v;
+}
+
+void LexicalEnvironmentObject::setWindowProxyThisValue(JSObject* obj) {
+  MOZ_ASSERT(isGlobal());
+  MOZ_ASSERT(IsWindowProxy(obj));
+  setReservedSlot(THIS_VALUE_OR_SCOPE_SLOT, ObjectValue(*obj));
 }
 
 const Class LexicalEnvironmentObject::class_ = {
     "LexicalEnvironment",
-    JSCLASS_HAS_RESERVED_SLOTS(LexicalEnvironmentObject::RESERVED_SLOTS) |
-        JSCLASS_IS_ANONYMOUS,
+    JSCLASS_HAS_RESERVED_SLOTS(LexicalEnvironmentObject::RESERVED_SLOTS),
     JS_NULL_CLASS_OPS,
     JS_NULL_CLASS_SPEC,
     JS_NULL_CLASS_EXT,
     JS_NULL_OBJECT_OPS};
 
-/* static */ NamedLambdaObject* NamedLambdaObject::create(
-    JSContext* cx, HandleFunction callee, HandleFunction func,
-    HandleObject enclosing, gc::InitialHeap heap) {
+/* static */
+NamedLambdaObject* NamedLambdaObject::create(JSContext* cx,
+                                             HandleFunction callee,
+                                             HandleFunction func,
+                                             HandleObject enclosing,
+                                             gc::InitialHeap heap) {
   MOZ_ASSERT(callee->isNamedLambda());
   RootedScope scope(cx, callee->nonLazyScript()->maybeNamedLambdaScope());
   MOZ_ASSERT(scope && scope->environmentShape());
@@ -1019,42 +1119,43 @@ const Class LexicalEnvironmentObject::class_ = {
 
   LexicalEnvironmentObject* obj = LexicalEnvironmentObject::create(
       cx, scope.as<LexicalScope>(), enclosing, heap);
-  if (!obj) return nullptr;
+  if (!obj) {
+    return nullptr;
+  }
 
   obj->initFixedSlot(lambdaSlot(), ObjectValue(*func));
   return static_cast<NamedLambdaObject*>(obj);
 }
 
-/* static */ NamedLambdaObject* NamedLambdaObject::createTemplateObject(
+/* static */
+NamedLambdaObject* NamedLambdaObject::createTemplateObject(
     JSContext* cx, HandleFunction callee, gc::InitialHeap heap) {
   return create(cx, callee, callee, nullptr, heap);
 }
 
-/* static */ NamedLambdaObject* NamedLambdaObject::create(
-    JSContext* cx, AbstractFramePtr frame) {
+/* static */
+NamedLambdaObject* NamedLambdaObject::create(JSContext* cx,
+                                             AbstractFramePtr frame) {
   RootedFunction fun(cx, frame.callee());
   RootedObject enclosing(cx, frame.environmentChain());
   return create(cx, fun, fun, enclosing, gc::DefaultHeap);
 }
 
-/* static */ NamedLambdaObject* NamedLambdaObject::create(
-    JSContext* cx, AbstractFramePtr frame, HandleFunction replacement) {
-  RootedFunction fun(cx, frame.callee());
-  RootedObject enclosing(cx, frame.environmentChain());
-  return create(cx, fun, replacement, enclosing, gc::DefaultHeap);
-}
-
-/* static */ size_t NamedLambdaObject::lambdaSlot() {
+/* static */
+size_t NamedLambdaObject::lambdaSlot() {
   // Named lambda environments have exactly one name.
   return JSSLOT_FREE(&LexicalEnvironmentObject::class_);
 }
 
-/* static */ RuntimeLexicalErrorObject* RuntimeLexicalErrorObject::create(
+/* static */
+RuntimeLexicalErrorObject* RuntimeLexicalErrorObject::create(
     JSContext* cx, HandleObject enclosing, unsigned errorNumber) {
   RuntimeLexicalErrorObject* obj =
       NewObjectWithNullTaggedProto<RuntimeLexicalErrorObject>(
           cx, GenericObject, BaseShape::DELEGATE);
-  if (!obj) return nullptr;
+  if (!obj) {
+    return nullptr;
+  }
   obj->initEnclosingEnvironment(enclosing);
   obj->initReservedSlot(ERROR_SLOT, Int32Value(int32_t(errorNumber)));
   return obj;
@@ -1132,8 +1233,7 @@ static const ObjectOps RuntimeLexicalErrorObjectObjectOps = {
 
 const Class RuntimeLexicalErrorObject::class_ = {
     "RuntimeLexicalError",
-    JSCLASS_HAS_RESERVED_SLOTS(RuntimeLexicalErrorObject::RESERVED_SLOTS) |
-        JSCLASS_IS_ANONYMOUS,
+    JSCLASS_HAS_RESERVED_SLOTS(RuntimeLexicalErrorObject::RESERVED_SLOTS),
     JS_NULL_CLASS_OPS,
     JS_NULL_CLASS_SPEC,
     JS_NULL_CLASS_EXT,
@@ -1162,7 +1262,7 @@ EnvironmentIter::EnvironmentIter(JSContext* cx, AbstractFramePtr frame,
     : si_(cx, frame.script()->innermostScope(pc)),
       env_(cx, frame.environmentChain()),
       frame_(frame) {
-  assertSameCompartment(cx, frame);
+  cx->check(frame);
   settle();
   MOZ_GUARD_OBJECT_NOTIFIER_INIT;
 }
@@ -1171,7 +1271,7 @@ EnvironmentIter::EnvironmentIter(JSContext* cx, JSObject* env, Scope* scope,
                                  AbstractFramePtr frame
                                      MOZ_GUARD_OBJECT_NOTIFIER_PARAM_IN_IMPL)
     : si_(cx, ScopeIter(scope)), env_(cx, env), frame_(frame) {
-  assertSameCompartment(cx, frame);
+  cx->check(frame);
   settle();
   MOZ_GUARD_OBJECT_NOTIFIER_INIT;
 }
@@ -1182,7 +1282,9 @@ void EnvironmentIter::incrementScopeIter() {
     // GlobalScopes correspond to zero or more non-syntactic
     // EnvironmentsObjects followed by the global lexical scope, then the
     // GlobalObject or another non-EnvironmentObject object.
-    if (!env_->is<EnvironmentObject>()) si_++;
+    if (!env_->is<EnvironmentObject>()) {
+      si_++;
+    }
   } else {
     si_++;
   }
@@ -1277,17 +1379,21 @@ bool EnvironmentIter::hasNonSyntacticEnvironmentObject() const {
   return false;
 }
 
-/* static */ HashNumber MissingEnvironmentKey::hash(MissingEnvironmentKey ek) {
+/* static */
+HashNumber MissingEnvironmentKey::hash(MissingEnvironmentKey ek) {
   return size_t(ek.frame_.raw()) ^ size_t(ek.scope_);
 }
 
-/* static */ bool MissingEnvironmentKey::match(MissingEnvironmentKey ek1,
-                                               MissingEnvironmentKey ek2) {
+/* static */
+bool MissingEnvironmentKey::match(MissingEnvironmentKey ek1,
+                                  MissingEnvironmentKey ek2) {
   return ek1.frame_ == ek2.frame_ && ek1.scope_ == ek2.scope_;
 }
 
 bool LiveEnvironmentVal::needsSweep() {
-  if (scope_) MOZ_ALWAYS_FALSE(IsAboutToBeFinalized(&scope_));
+  if (scope_) {
+    MOZ_ALWAYS_FALSE(IsAboutToBeFinalized(&scope_));
+  }
   return false;
 }
 
@@ -1311,10 +1417,10 @@ void LiveEnvironmentVal::staticAsserts() {
 namespace {
 
 static void ReportOptimizedOut(JSContext* cx, HandleId id) {
-  JSAutoByteString printable;
-  if (ValueToPrintable(cx, IdToValue(id), &printable)) {
-    JS_ReportErrorNumberLatin1(cx, GetErrorMessage, nullptr,
-                               JSMSG_DEBUG_OPTIMIZED_OUT, printable.ptr());
+  if (UniqueChars printable =
+          IdToPrintableUTF8(cx, id, IdToPrintableBehavior::IdIsIdentifier)) {
+    JS_ReportErrorNumberUTF8(cx, GetErrorMessage, nullptr,
+                             JSMSG_DEBUG_OPTIMIZED_OUT, printable.get());
   }
 }
 
@@ -1375,40 +1481,56 @@ class DebugEnvironmentProxyHandler : public BaseProxyHandler {
     LiveEnvironmentVal* maybeLiveEnv =
         DebugEnvironments::hasLiveEnvironment(*env);
 
-    if (env->is<ModuleEnvironmentObject>()) {
-      /* Everything is aliased and stored in the environment object. */
-      return true;
-    }
-
-    /* Handle unaliased formals, vars, lets, and consts at function scope. */
-    if (env->is<CallObject>()) {
-      CallObject& callobj = env->as<CallObject>();
-      RootedFunction fun(cx, &callobj.callee());
-      RootedScript script(cx, JSFunction::getOrCreateScript(cx, fun));
-      AutoKeepTypeScripts keepTypes(cx);
-      if (!script->ensureHasTypes(cx, keepTypes) ||
-          !script->ensureHasAnalyzedArgsUsage(cx))
-        return false;
+    // Handle unaliased formals, vars, lets, and consts at function or module
+    // scope.
+    if (env->is<CallObject>() || env->is<ModuleEnvironmentObject>()) {
+      RootedScript script(cx);
+      if (env->is<CallObject>()) {
+        CallObject& callobj = env->as<CallObject>();
+        RootedFunction fun(cx, &callobj.callee());
+        script = JSFunction::getOrCreateScript(cx, fun);
+        if (!script->ensureHasAnalyzedArgsUsage(cx)) {
+          return false;
+        }
+      } else {
+        script = env->as<ModuleEnvironmentObject>().module().maybeScript();
+        if (!script) {
+          *accessResult = ACCESS_LOST;
+          return true;
+        }
+      }
 
       BindingIter bi(script);
-      while (bi && NameToId(bi.name()->asPropertyName()) != id) bi++;
-      if (!bi) return true;
+      while (bi && NameToId(bi.name()->asPropertyName()) != id) {
+        bi++;
+      }
+      if (!bi) {
+        return true;
+      }
+
+      if (bi.location().kind() == BindingLocation::Kind::Import) {
+        return true;
+      }
 
       if (!bi.hasArgumentSlot()) {
-        if (bi.closedOver()) return true;
+        if (bi.closedOver()) {
+          return true;
+        }
 
         uint32_t i = bi.location().slot();
         if (maybeLiveEnv) {
           AbstractFramePtr frame = maybeLiveEnv->frame();
-          if (action == GET)
+          if (action == GET) {
             vp.set(frame.unaliasedLocal(i));
-          else
+          } else {
             frame.unaliasedLocal(i) = vp;
+          }
         } else if (NativeObject* snapshot = debugEnv->maybeSnapshot()) {
-          if (action == GET)
+          if (action == GET) {
             vp.set(snapshot->getDenseElement(script->numArgs() + i));
-          else
+          } else {
             snapshot->setDenseElement(script->numArgs() + i, vp);
+          }
         } else {
           /* The unaliased value has been lost to the debugger. */
           if (action == GET) {
@@ -1418,26 +1540,31 @@ class DebugEnvironmentProxyHandler : public BaseProxyHandler {
         }
       } else {
         unsigned i = bi.argumentSlot();
-        if (bi.closedOver()) return true;
+        if (bi.closedOver()) {
+          return true;
+        }
 
         if (maybeLiveEnv) {
           AbstractFramePtr frame = maybeLiveEnv->frame();
           if (script->argsObjAliasesFormals() && frame.hasArgsObj()) {
-            if (action == GET)
+            if (action == GET) {
               vp.set(frame.argsObj().arg(i));
-            else
+            } else {
               frame.argsObj().setArg(i, vp);
+            }
           } else {
-            if (action == GET)
+            if (action == GET) {
               vp.set(frame.unaliasedFormal(i, DONT_CHECK_ALIASING));
-            else
+            } else {
               frame.unaliasedFormal(i, DONT_CHECK_ALIASING) = vp;
+            }
           }
         } else if (NativeObject* snapshot = debugEnv->maybeSnapshot()) {
-          if (action == GET)
+          if (action == GET) {
             vp.set(snapshot->getDenseElement(i));
-          else
+          } else {
             snapshot->setDenseElement(i, vp);
+          }
         } else {
           /* The unaliased value has been lost to the debugger. */
           if (action == GET) {
@@ -1446,17 +1573,20 @@ class DebugEnvironmentProxyHandler : public BaseProxyHandler {
           }
         }
 
-        if (action == SET) TypeScript::SetArgument(cx, script, i, vp);
+        if (action == SET) {
+          TypeScript::SetArgument(cx, script, i, vp);
+        }
       }
 
       // It is possible that an optimized out value flows to this
       // location due to Debugger.Frame.prototype.eval operating on a
       // live bailed-out Baseline frame. In that case, treat the access
       // as lost.
-      if (vp.isMagic() && vp.whyMagic() == JS_OPTIMIZED_OUT)
+      if (vp.isMagic() && vp.whyMagic() == JS_OPTIMIZED_OUT) {
         *accessResult = ACCESS_LOST;
-      else
+      } else {
         *accessResult = ACCESS_UNALIASED;
+      }
 
       return true;
     }
@@ -1478,26 +1608,36 @@ class DebugEnvironmentProxyHandler : public BaseProxyHandler {
 
       // Currently all vars inside eval var environments are aliased.
       if (env->is<VarEnvironmentObject>() &&
-          env->as<VarEnvironmentObject>().isForEval())
+          env->as<VarEnvironmentObject>().isForEval()) {
         return true;
+      }
 
       RootedScope scope(cx, getEnvironmentScope(*env));
       uint32_t firstFrameSlot;
-      if (env->is<LexicalEnvironmentObject>())
+      if (env->is<LexicalEnvironmentObject>()) {
         firstFrameSlot = scope->as<LexicalScope>().firstFrameSlot();
-      else
+      } else {
         firstFrameSlot = scope->as<VarScope>().firstFrameSlot();
+      }
 
       BindingIter bi(scope);
-      while (bi && NameToId(bi.name()->asPropertyName()) != id) bi++;
-      if (!bi) return true;
+      while (bi && NameToId(bi.name()->asPropertyName()) != id) {
+        bi++;
+      }
+      if (!bi) {
+        return true;
+      }
 
       BindingLocation loc = bi.location();
-      if (loc.kind() == BindingLocation::Kind::Environment) return true;
+      if (loc.kind() == BindingLocation::Kind::Environment) {
+        return true;
+      }
 
       // Named lambdas that are not closed over are lost.
       if (loc.kind() == BindingLocation::Kind::NamedLambdaCallee) {
-        if (action == GET) *accessResult = ACCESS_LOST;
+        if (action == GET) {
+          *accessResult = ACCESS_LOST;
+        }
         return true;
       }
 
@@ -1507,19 +1647,21 @@ class DebugEnvironmentProxyHandler : public BaseProxyHandler {
         AbstractFramePtr frame = maybeLiveEnv->frame();
         uint32_t local = loc.slot();
         MOZ_ASSERT(local < frame.script()->nfixed());
-        if (action == GET)
+        if (action == GET) {
           vp.set(frame.unaliasedLocal(local));
-        else
+        } else {
           frame.unaliasedLocal(local) = vp;
+        }
       } else if (NativeObject* snapshot = debugEnv->maybeSnapshot()) {
         // Indices in the frame snapshot are offset by the first frame
         // slot. See DebugEnvironments::takeFrameSnapshot.
         MOZ_ASSERT(loc.slot() >= firstFrameSlot);
         uint32_t snapshotIndex = loc.slot() - firstFrameSlot;
-        if (action == GET)
+        if (action == GET) {
           vp.set(snapshot->getDenseElement(snapshotIndex));
-        else
+        } else {
           snapshot->setDenseElement(snapshotIndex, vp);
+        }
       } else {
         if (action == GET) {
           // A {Lexical,Var}EnvironmentObject whose static scope
@@ -1531,17 +1673,22 @@ class DebugEnvironmentProxyHandler : public BaseProxyHandler {
             return true;
           }
 
-          if (!GetProperty(cx, env, env, id, vp)) return false;
+          if (!GetProperty(cx, env, env, id, vp)) {
+            return false;
+          }
         } else {
-          if (!SetProperty(cx, env, id, vp)) return false;
+          if (!SetProperty(cx, env, id, vp)) {
+            return false;
+          }
         }
       }
 
       // See comment above in analogous CallObject case.
-      if (vp.isMagic() && vp.whyMagic() == JS_OPTIMIZED_OUT)
+      if (vp.isMagic() && vp.whyMagic() == JS_OPTIMIZED_OUT) {
         *accessResult = ACCESS_LOST;
-      else
+      } else {
         *accessResult = ACCESS_UNALIASED;
+      }
 
       return true;
     }
@@ -1551,7 +1698,9 @@ class DebugEnvironmentProxyHandler : public BaseProxyHandler {
         RootedScope scope(cx, getEnvironmentScope(*env));
         uint32_t index = 0;
         for (BindingIter bi(scope); bi; bi++) {
-          if (JSID_IS_ATOM(id, bi.name())) break;
+          if (JSID_IS_ATOM(id, bi.name())) {
+            break;
+          }
           MOZ_ASSERT(!bi.isLast());
           index++;
         }
@@ -1579,7 +1728,9 @@ class DebugEnvironmentProxyHandler : public BaseProxyHandler {
       MOZ_ASSERT(scope->is<WasmInstanceScope>());
       uint32_t index = 0;
       for (BindingIter bi(scope); bi; bi++) {
-        if (JSID_IS_ATOM(id, bi.name())) break;
+        if (JSID_IS_ATOM(id, bi.name())) {
+          break;
+        }
         MOZ_ASSERT(!bi.isLast());
         index++;
       }
@@ -1632,16 +1783,25 @@ class DebugEnvironmentProxyHandler : public BaseProxyHandler {
   }
 
   static Scope* getEnvironmentScope(const JSObject& env) {
-    if (isFunctionEnvironment(env))
+    if (isFunctionEnvironment(env)) {
       return env.as<CallObject>().callee().nonLazyScript()->bodyScope();
-    if (isNonExtensibleLexicalEnvironment(env))
+    }
+    if (env.is<ModuleEnvironmentObject>()) {
+      JSScript* script = env.as<ModuleEnvironmentObject>().module().maybeScript();
+      return script ? script->bodyScope() : nullptr;
+    }
+    if (isNonExtensibleLexicalEnvironment(env)) {
       return &env.as<LexicalEnvironmentObject>().scope();
-    if (env.is<VarEnvironmentObject>())
+    }
+    if (env.is<VarEnvironmentObject>()) {
       return &env.as<VarEnvironmentObject>().scope();
-    if (env.is<WasmInstanceEnvironmentObject>())
+    }
+    if (env.is<WasmInstanceEnvironmentObject>()) {
       return &env.as<WasmInstanceEnvironmentObject>().scope();
-    if (env.is<WasmFunctionCallObject>())
+    }
+    if (env.is<WasmFunctionCallObject>()) {
       return &env.as<WasmFunctionCallObject>().scope();
+    }
     return nullptr;
   }
 
@@ -1757,7 +1917,9 @@ class DebugEnvironmentProxyHandler : public BaseProxyHandler {
     argsObj.set(nullptr);
 
     LiveEnvironmentVal* maybeEnv = DebugEnvironments::hasLiveEnvironment(env);
-    if (!maybeEnv) return true;
+    if (!maybeEnv) {
+      return true;
+    }
 
     argsObj.set(ArgumentsObject::createUnexpected(cx, maybeEnv->frame()));
     return !!argsObj;
@@ -1772,9 +1934,13 @@ class DebugEnvironmentProxyHandler : public BaseProxyHandler {
     *success = false;
 
     LiveEnvironmentVal* maybeEnv = DebugEnvironments::hasLiveEnvironment(env);
-    if (!maybeEnv) return true;
+    if (!maybeEnv) {
+      return true;
+    }
 
-    if (!GetFunctionThis(cx, maybeEnv->frame(), thisv)) return false;
+    if (!GetFunctionThis(cx, maybeEnv->frame(), thisv)) {
+      return false;
+    }
 
     // Update the this-argument to avoid boxing primitive |this| more
     // than once.
@@ -1817,17 +1983,13 @@ class DebugEnvironmentProxyHandler : public BaseProxyHandler {
     return true;
   }
 
-  bool getPropertyDescriptor(
-      JSContext* cx, HandleObject proxy, HandleId id,
-      MutableHandle<PropertyDescriptor> desc) const override {
-    return getOwnPropertyDescriptor(cx, proxy, id, desc);
-  }
-
   bool getMissingArgumentsPropertyDescriptor(
       JSContext* cx, Handle<DebugEnvironmentProxy*> debugEnv,
       EnvironmentObject& env, MutableHandle<PropertyDescriptor> desc) const {
     RootedArgumentsObject argsObj(cx);
-    if (!createMissingArguments(cx, env, &argsObj)) return false;
+    if (!createMissingArguments(cx, env, &argsObj)) {
+      return false;
+    }
 
     if (!argsObj) {
       JS_ReportErrorNumberASCII(cx, GetErrorMessage, nullptr,
@@ -1847,7 +2009,9 @@ class DebugEnvironmentProxyHandler : public BaseProxyHandler {
       EnvironmentObject& env, MutableHandle<PropertyDescriptor> desc) const {
     RootedValue thisv(cx);
     bool success;
-    if (!createMissingThis(cx, env, &thisv, &success)) return false;
+    if (!createMissingThis(cx, env, &thisv, &success)) {
+      return false;
+    }
 
     if (!success) {
       JS_ReportErrorNumberASCII(cx, GetErrorMessage, nullptr,
@@ -1870,22 +2034,26 @@ class DebugEnvironmentProxyHandler : public BaseProxyHandler {
         cx, &proxy->as<DebugEnvironmentProxy>());
     Rooted<EnvironmentObject*> env(cx, &debugEnv->environment());
 
-    if (isMissingArguments(cx, id, *env))
+    if (isMissingArguments(cx, id, *env)) {
       return getMissingArgumentsPropertyDescriptor(cx, debugEnv, *env, desc);
+    }
 
-    if (isMissingThis(cx, id, *env))
+    if (isMissingThis(cx, id, *env)) {
       return getMissingThisPropertyDescriptor(cx, debugEnv, *env, desc);
+    }
 
     RootedValue v(cx);
     AccessResult access;
-    if (!handleUnaliasedAccess(cx, debugEnv, env, id, GET, &v, &access))
+    if (!handleUnaliasedAccess(cx, debugEnv, env, id, GET, &v, &access)) {
       return false;
+    }
 
     switch (access) {
       case ACCESS_UNALIASED:
-        if (isMagicMissingArgumentsValue(*env, v))
+        if (isMagicMissingArgumentsValue(*env, v)) {
           return getMissingArgumentsPropertyDescriptor(cx, debugEnv, *env,
                                                        desc);
+        }
         desc.object().set(debugEnv);
         desc.setAttributes(JSPROP_READONLY | JSPROP_ENUMERATE |
                            JSPROP_PERMANENT);
@@ -1906,7 +2074,9 @@ class DebugEnvironmentProxyHandler : public BaseProxyHandler {
   bool getMissingArguments(JSContext* cx, EnvironmentObject& env,
                            MutableHandleValue vp) const {
     RootedArgumentsObject argsObj(cx);
-    if (!createMissingArguments(cx, env, &argsObj)) return false;
+    if (!createMissingArguments(cx, env, &argsObj)) {
+      return false;
+    }
 
     if (!argsObj) {
       JS_ReportErrorNumberASCII(cx, GetErrorMessage, nullptr,
@@ -1922,7 +2092,9 @@ class DebugEnvironmentProxyHandler : public BaseProxyHandler {
                       MutableHandleValue vp) const {
     RootedValue thisv(cx);
     bool success;
-    if (!createMissingThis(cx, env, &thisv, &success)) return false;
+    if (!createMissingThis(cx, env, &thisv, &success)) {
+      return false;
+    }
 
     if (!success) {
       JS_ReportErrorNumberASCII(cx, GetErrorMessage, nullptr,
@@ -1941,26 +2113,35 @@ class DebugEnvironmentProxyHandler : public BaseProxyHandler {
     Rooted<EnvironmentObject*> env(
         cx, &proxy->as<DebugEnvironmentProxy>().environment());
 
-    if (isMissingArguments(cx, id, *env))
+    if (isMissingArguments(cx, id, *env)) {
       return getMissingArguments(cx, *env, vp);
+    }
 
-    if (isMissingThis(cx, id, *env)) return getMissingThis(cx, *env, vp);
+    if (isMissingThis(cx, id, *env)) {
+      return getMissingThis(cx, *env, vp);
+    }
 
     AccessResult access;
-    if (!handleUnaliasedAccess(cx, debugEnv, env, id, GET, vp, &access))
+    if (!handleUnaliasedAccess(cx, debugEnv, env, id, GET, vp, &access)) {
       return false;
+    }
 
     switch (access) {
       case ACCESS_UNALIASED:
-        if (isMagicMissingArgumentsValue(*env, vp))
+        if (isMagicMissingArgumentsValue(*env, vp)) {
           return getMissingArguments(cx, *env, vp);
-        if (isMaybeUninitializedThisValue(cx, id, vp))
+        }
+        if (isMaybeUninitializedThisValue(cx, id, vp)) {
           return getMissingThis(cx, *env, vp);
+        }
         return true;
       case ACCESS_GENERIC:
-        if (!GetProperty(cx, env, env, id, vp)) return false;
-        if (isMaybeUninitializedThisValue(cx, id, vp))
+        if (!GetProperty(cx, env, env, id, vp)) {
+          return false;
+        }
+        if (isMaybeUninitializedThisValue(cx, id, vp)) {
           return getMissingThis(cx, *env, vp);
+        }
         return true;
       case ACCESS_LOST:
         ReportOptimizedOut(cx, id);
@@ -1974,7 +2155,9 @@ class DebugEnvironmentProxyHandler : public BaseProxyHandler {
                                              EnvironmentObject& env,
                                              MutableHandleValue vp) const {
     RootedArgumentsObject argsObj(cx);
-    if (!createMissingArguments(cx, env, &argsObj)) return false;
+    if (!createMissingArguments(cx, env, &argsObj)) {
+      return false;
+    }
     vp.set(argsObj ? ObjectValue(*argsObj)
                    : MagicValue(JS_OPTIMIZED_ARGUMENTS));
     return true;
@@ -1984,7 +2167,9 @@ class DebugEnvironmentProxyHandler : public BaseProxyHandler {
                                         MutableHandleValue vp) const {
     RootedValue thisv(cx);
     bool success;
-    if (!createMissingThis(cx, env, &thisv, &success)) return false;
+    if (!createMissingThis(cx, env, &thisv, &success)) {
+      return false;
+    }
     vp.set(success ? thisv : MagicValue(JS_OPTIMIZED_OUT));
     return true;
   }
@@ -1998,26 +2183,34 @@ class DebugEnvironmentProxyHandler : public BaseProxyHandler {
                              HandleId id, MutableHandleValue vp) const {
     Rooted<EnvironmentObject*> env(cx, &debugEnv->environment());
 
-    if (isMissingArguments(cx, id, *env))
+    if (isMissingArguments(cx, id, *env)) {
       return getMissingArgumentsMaybeSentinelValue(cx, *env, vp);
-    if (isMissingThis(cx, id, *env))
+    }
+    if (isMissingThis(cx, id, *env)) {
       return getMissingThisMaybeSentinelValue(cx, *env, vp);
+    }
 
     AccessResult access;
-    if (!handleUnaliasedAccess(cx, debugEnv, env, id, GET, vp, &access))
+    if (!handleUnaliasedAccess(cx, debugEnv, env, id, GET, vp, &access)) {
       return false;
+    }
 
     switch (access) {
       case ACCESS_UNALIASED:
-        if (isMagicMissingArgumentsValue(*env, vp))
+        if (isMagicMissingArgumentsValue(*env, vp)) {
           return getMissingArgumentsMaybeSentinelValue(cx, *env, vp);
-        if (isMaybeUninitializedThisValue(cx, id, vp))
+        }
+        if (isMaybeUninitializedThisValue(cx, id, vp)) {
           return getMissingThisMaybeSentinelValue(cx, *env, vp);
+        }
         return true;
       case ACCESS_GENERIC:
-        if (!GetProperty(cx, env, env, id, vp)) return false;
-        if (isMaybeUninitializedThisValue(cx, id, vp))
+        if (!GetProperty(cx, env, env, id, vp)) {
+          return false;
+        }
+        if (isMaybeUninitializedThisValue(cx, id, vp)) {
           return getMissingThisMaybeSentinelValue(cx, *env, vp);
+        }
         return true;
       case ACCESS_LOST:
         vp.setMagic(JS_OPTIMIZED_OUT);
@@ -2034,13 +2227,15 @@ class DebugEnvironmentProxyHandler : public BaseProxyHandler {
     Rooted<EnvironmentObject*> env(
         cx, &proxy->as<DebugEnvironmentProxy>().environment());
 
-    if (debugEnv->isOptimizedOut())
+    if (debugEnv->isOptimizedOut()) {
       return Throw(cx, id, JSMSG_DEBUG_CANT_SET_OPT_ENV);
+    }
 
     AccessResult access;
     RootedValue valCopy(cx, v);
-    if (!handleUnaliasedAccess(cx, debugEnv, env, id, SET, &valCopy, &access))
+    if (!handleUnaliasedAccess(cx, debugEnv, env, id, SET, &valCopy, &access)) {
       return false;
+    }
 
     switch (access) {
       case ACCESS_UNALIASED:
@@ -2061,22 +2256,30 @@ class DebugEnvironmentProxyHandler : public BaseProxyHandler {
         cx, &proxy->as<DebugEnvironmentProxy>().environment());
 
     bool found;
-    if (!has(cx, proxy, id, &found)) return false;
-    if (found) return Throw(cx, id, JSMSG_CANT_REDEFINE_PROP);
+    if (!has(cx, proxy, id, &found)) {
+      return false;
+    }
+    if (found) {
+      return Throw(cx, id, JSMSG_CANT_REDEFINE_PROP);
+    }
 
     return JS_DefinePropertyById(cx, env, id, desc, result);
   }
 
   bool ownPropertyKeys(JSContext* cx, HandleObject proxy,
-                       AutoIdVector& props) const override {
+                       MutableHandleIdVector props) const override {
     Rooted<EnvironmentObject*> env(
         cx, &proxy->as<DebugEnvironmentProxy>().environment());
 
     if (isMissingArgumentsBinding(*env)) {
-      if (!props.append(NameToId(cx->names().arguments))) return false;
+      if (!props.append(NameToId(cx->names().arguments))) {
+        return false;
+      }
     }
     if (isMissingThisBinding(*env)) {
-      if (!props.append(NameToId(cx->names().dotThis))) return false;
+      if (!props.append(NameToId(cx->names().dotThis))) {
+        return false;
+      }
     }
 
     // WithEnvironmentObject isn't a very good proxy.  It doesn't have a
@@ -2088,20 +2291,29 @@ class DebugEnvironmentProxyHandler : public BaseProxyHandler {
     // examine @@unscopables.
     RootedObject target(cx);
     bool isWith = env->is<WithEnvironmentObject>();
-    if (isWith)
+    if (isWith) {
       target = &env->as<WithEnvironmentObject>().object();
-    else
+    } else {
       target = env;
-    if (!GetPropertyKeys(cx, target, JSITER_OWNONLY, &props)) return false;
+    }
+    if (!GetPropertyKeys(cx, target, JSITER_OWNONLY, props)) {
+      return false;
+    }
 
     if (isWith) {
       size_t j = 0;
       for (size_t i = 0; i < props.length(); i++) {
         bool inScope;
-        if (!CheckUnscopables(cx, env, props[i], &inScope)) return false;
-        if (inScope) props[j++].set(props[i]);
+        if (!CheckUnscopables(cx, env, props[i], &inScope)) {
+          return false;
+        }
+        if (inScope) {
+          props[j++].set(props[i]);
+        }
       }
-      if (!props.resize(j)) return false;
+      if (!props.resize(j)) {
+        return false;
+      }
     }
 
     /*
@@ -2111,8 +2323,9 @@ class DebugEnvironmentProxyHandler : public BaseProxyHandler {
     if (Scope* scope = getEnvironmentScope(*env)) {
       for (Rooted<BindingIter> bi(cx, BindingIter(scope)); bi; bi++) {
         if (!bi.closedOver() &&
-            !props.append(NameToId(bi.name()->asPropertyName())))
+            !props.append(NameToId(bi.name()->asPropertyName()))) {
           return false;
+        }
       }
     }
 
@@ -2139,7 +2352,9 @@ class DebugEnvironmentProxyHandler : public BaseProxyHandler {
 
     bool found;
     RootedObject env(cx, &envObj);
-    if (!JS_HasPropertyById(cx, env, id, &found)) return false;
+    if (!JS_HasPropertyById(cx, env, id, &found)) {
+      return false;
+    }
 
     if (!found) {
       if (Scope* scope = getEnvironmentScope(*env)) {
@@ -2172,15 +2387,19 @@ bool JSObject::is<js::DebugEnvironmentProxy>() const {
 const char DebugEnvironmentProxyHandler::family = 0;
 const DebugEnvironmentProxyHandler DebugEnvironmentProxyHandler::singleton;
 
-/* static */ DebugEnvironmentProxy* DebugEnvironmentProxy::create(
-    JSContext* cx, EnvironmentObject& env, HandleObject enclosing) {
-  MOZ_ASSERT(env.compartment() == cx->compartment());
+/* static */
+DebugEnvironmentProxy* DebugEnvironmentProxy::create(JSContext* cx,
+                                                     EnvironmentObject& env,
+                                                     HandleObject enclosing) {
+  MOZ_ASSERT(env.realm() == cx->realm());
   MOZ_ASSERT(!enclosing->is<EnvironmentObject>());
 
   RootedValue priv(cx, ObjectValue(env));
   JSObject* obj = NewProxyObject(cx, &DebugEnvironmentProxyHandler::singleton,
                                  priv, nullptr /* proto */);
-  if (!obj) return nullptr;
+  if (!obj) {
+    return nullptr;
+  }
 
   DebugEnvironmentProxy* debugEnv = &obj->as<DebugEnvironmentProxy>();
   debugEnv->setReservedSlot(ENCLOSING_SLOT, ObjectValue(*enclosing));
@@ -2215,7 +2434,8 @@ bool DebugEnvironmentProxy::isForDeclarative() const {
          e.is<WasmFunctionCallObject>() || e.is<LexicalEnvironmentObject>();
 }
 
-/* static */ bool DebugEnvironmentProxy::getMaybeSentinelValue(
+/* static */
+bool DebugEnvironmentProxy::getMaybeSentinelValue(
     JSContext* cx, Handle<DebugEnvironmentProxy*> env, HandleId id,
     MutableHandleValue vp) {
   return DebugEnvironmentProxyHandler::singleton.getMaybeSentinelValue(cx, env,
@@ -2230,7 +2450,9 @@ bool DebugEnvironmentProxy::isFunctionEnvironmentWithThis() {
 bool DebugEnvironmentProxy::isOptimizedOut() const {
   EnvironmentObject& e = environment();
 
-  if (DebugEnvironments::hasLiveEnvironment(e)) return false;
+  if (DebugEnvironments::hasLiveEnvironment(e)) {
+    return false;
+  }
 
   if (e.is<LexicalEnvironmentObject>()) {
     return !e.as<LexicalEnvironmentObject>().isExtensible() &&
@@ -2252,13 +2474,7 @@ DebugEnvironments::DebugEnvironments(JSContext* cx, Zone* zone)
       missingEnvs(cx->zone()),
       liveEnvs(cx->zone()) {}
 
-DebugEnvironments::~DebugEnvironments() {
-  MOZ_ASSERT_IF(missingEnvs.initialized(), missingEnvs.empty());
-}
-
-bool DebugEnvironments::init() {
-  return proxiedEnvs.init() && missingEnvs.init() && liveEnvs.init();
-}
+DebugEnvironments::~DebugEnvironments() { MOZ_ASSERT(missingEnvs.empty()); }
 
 void DebugEnvironments::trace(JSTracer* trc) { proxiedEnvs.trace(trc); }
 
@@ -2318,7 +2534,8 @@ void DebugEnvironments::checkHashTablesAfterMovingGC() {
   for (MissingEnvironmentMap::Range r = missingEnvs.all(); !r.empty();
        r.popFront()) {
     CheckGCThingAfterMovingGC(r.front().key().scope());
-    CheckGCThingAfterMovingGC(r.front().value().get());
+    // Use unbarrieredGet() to prevent triggering read barrier while collecting.
+    CheckGCThingAfterMovingGC(r.front().value().unbarrieredGet());
   }
   for (LiveEnvironmentMap::Range r = liveEnvs.all(); !r.empty(); r.popFront()) {
     CheckGCThingAfterMovingGC(r.front().key());
@@ -2336,27 +2553,31 @@ void DebugEnvironments::checkHashTablesAfterMovingGC() {
  * fine.
  */
 static bool CanUseDebugEnvironmentMaps(JSContext* cx) {
-  return cx->compartment()->isDebuggee();
+  return cx->realm()->isDebuggee();
 }
 
-DebugEnvironments* DebugEnvironments::ensureCompartmentData(JSContext* cx) {
-  JSCompartment* c = cx->compartment();
-  if (c->debugEnvs) return c->debugEnvs;
+DebugEnvironments* DebugEnvironments::ensureRealmData(JSContext* cx) {
+  Realm* realm = cx->realm();
+  if (auto* debugEnvs = realm->debugEnvs()) {
+    return debugEnvs;
+  }
 
   auto debugEnvs = cx->make_unique<DebugEnvironments>(cx, cx->zone());
-  if (!debugEnvs || !debugEnvs->init()) {
-    ReportOutOfMemory(cx);
+  if (!debugEnvs) {
     return nullptr;
   }
 
-  c->debugEnvs = debugEnvs.release();
-  return c->debugEnvs;
+  realm->debugEnvsRef() = std::move(debugEnvs);
+  return realm->debugEnvs();
 }
 
-/* static */ DebugEnvironmentProxy* DebugEnvironments::hasDebugEnvironment(
+/* static */
+DebugEnvironmentProxy* DebugEnvironments::hasDebugEnvironment(
     JSContext* cx, EnvironmentObject& env) {
-  DebugEnvironments* envs = env.compartment()->debugEnvs;
-  if (!envs) return nullptr;
+  DebugEnvironments* envs = env.realm()->debugEnvs();
+  if (!envs) {
+    return nullptr;
+  }
 
   if (JSObject* obj = envs->proxiedEnvs.lookup(&env)) {
     MOZ_ASSERT(CanUseDebugEnvironmentMaps(cx));
@@ -2366,26 +2587,34 @@ DebugEnvironments* DebugEnvironments::ensureCompartmentData(JSContext* cx) {
   return nullptr;
 }
 
-/* static */ bool DebugEnvironments::addDebugEnvironment(
+/* static */
+bool DebugEnvironments::addDebugEnvironment(
     JSContext* cx, Handle<EnvironmentObject*> env,
     Handle<DebugEnvironmentProxy*> debugEnv) {
-  MOZ_ASSERT(cx->compartment() == env->compartment());
-  MOZ_ASSERT(cx->compartment() == debugEnv->compartment());
+  MOZ_ASSERT(cx->realm() == env->realm());
+  MOZ_ASSERT(cx->realm() == debugEnv->nonCCWRealm());
 
-  if (!CanUseDebugEnvironmentMaps(cx)) return true;
+  if (!CanUseDebugEnvironmentMaps(cx)) {
+    return true;
+  }
 
-  DebugEnvironments* envs = ensureCompartmentData(cx);
-  if (!envs) return false;
+  DebugEnvironments* envs = ensureRealmData(cx);
+  if (!envs) {
+    return false;
+  }
 
   return envs->proxiedEnvs.add(cx, env, debugEnv);
 }
 
-/* static */ DebugEnvironmentProxy* DebugEnvironments::hasDebugEnvironment(
+/* static */
+DebugEnvironmentProxy* DebugEnvironments::hasDebugEnvironment(
     JSContext* cx, const EnvironmentIter& ei) {
   MOZ_ASSERT(!ei.hasSyntacticEnvironment());
 
-  DebugEnvironments* envs = cx->compartment()->debugEnvs;
-  if (!envs) return nullptr;
+  DebugEnvironments* envs = cx->realm()->debugEnvs();
+  if (!envs) {
+    return nullptr;
+  }
 
   if (MissingEnvironmentMap::Ptr p =
           envs->missingEnvs.lookup(MissingEnvironmentKey(ei))) {
@@ -2395,26 +2624,31 @@ DebugEnvironments* DebugEnvironments::ensureCompartmentData(JSContext* cx) {
   return nullptr;
 }
 
-/* static */ bool DebugEnvironments::addDebugEnvironment(
+/* static */
+bool DebugEnvironments::addDebugEnvironment(
     JSContext* cx, const EnvironmentIter& ei,
     Handle<DebugEnvironmentProxy*> debugEnv) {
   MOZ_ASSERT(!ei.hasSyntacticEnvironment());
-  MOZ_ASSERT(cx->compartment() == debugEnv->compartment());
+  MOZ_ASSERT(cx->realm() == debugEnv->nonCCWRealm());
   // Generators should always have environments.
   MOZ_ASSERT_IF(
       ei.scope().is<FunctionScope>(),
       !ei.scope().as<FunctionScope>().canonicalFunction()->isGenerator() &&
           !ei.scope().as<FunctionScope>().canonicalFunction()->isAsync());
 
-  if (!CanUseDebugEnvironmentMaps(cx)) return true;
+  if (!CanUseDebugEnvironmentMaps(cx)) {
+    return true;
+  }
 
-  DebugEnvironments* envs = ensureCompartmentData(cx);
-  if (!envs) return false;
+  DebugEnvironments* envs = ensureRealmData(cx);
+  if (!envs) {
+    return false;
+  }
 
   MissingEnvironmentKey key(ei);
   MOZ_ASSERT(!envs->missingEnvs.has(key));
   if (!envs->missingEnvs.put(key,
-                             ReadBarriered<DebugEnvironmentProxy*>(debugEnv))) {
+                             WeakHeapPtr<DebugEnvironmentProxy*>(debugEnv))) {
     ReportOutOfMemory(cx);
     return false;
   }
@@ -2432,7 +2666,8 @@ DebugEnvironments* DebugEnvironments::ensureCompartmentData(JSContext* cx) {
   return true;
 }
 
-/* static */ void DebugEnvironments::takeFrameSnapshot(
+/* static */
+void DebugEnvironments::takeFrameSnapshot(
     JSContext* cx, Handle<DebugEnvironmentProxy*> debugEnv,
     AbstractFramePtr frame) {
   /*
@@ -2447,11 +2682,11 @@ DebugEnvironments* DebugEnvironments::ensureCompartmentData(JSContext* cx) {
    * nullptr.
    */
 
+  JSScript* script = frame.script();
+
   // Act like no snapshot was taken if we run OOM while taking the snapshot.
   Rooted<GCVector<Value>> vec(cx, GCVector<Value>(cx));
   if (debugEnv->environment().is<CallObject>()) {
-    JSScript* script = frame.script();
-
     FunctionScope* scope = &script->bodyScope()->as<FunctionScope>();
     uint32_t frameSlotCount = scope->nextFrameSlot();
     MOZ_ASSERT(frameSlotCount <= script->nfixed());
@@ -2465,8 +2700,9 @@ DebugEnvironments* DebugEnvironments::ensureCompartmentData(JSContext* cx) {
       return;
     }
     mozilla::PodCopy(vec.begin(), frame.argv(), numFormals);
-    for (uint32_t slot = 0; slot < frameSlotCount; slot++)
+    for (uint32_t slot = 0; slot < frameSlotCount; slot++) {
       vec[slot + frame.numFormalArgs()].set(frame.unaliasedLocal(slot));
+    }
 
     /*
      * Copy in formals that are not aliased via the scope chain
@@ -2475,8 +2711,9 @@ DebugEnvironments* DebugEnvironments::ensureCompartmentData(JSContext* cx) {
     if (script->analyzedArgsUsage() && script->needsArgsObj() &&
         frame.hasArgsObj()) {
       for (unsigned i = 0; i < frame.numFormalArgs(); ++i) {
-        if (script->formalLivesInArgumentsObject(i))
+        if (script->formalLivesInArgumentsObject(i)) {
           vec[i].set(frame.argsObj().arg(i));
+        }
       }
     }
   } else {
@@ -2488,7 +2725,7 @@ DebugEnvironments* DebugEnvironments::ensureCompartmentData(JSContext* cx) {
           &debugEnv->environment().as<LexicalEnvironmentObject>().scope();
       frameSlotStart = scope->firstFrameSlot();
       frameSlotEnd = scope->nextFrameSlot();
-    } else {
+    } else if (debugEnv->environment().is<VarEnvironmentObject>()) {
       VarEnvironmentObject* env =
           &debugEnv->environment().as<VarEnvironmentObject>();
       if (frame.isFunctionFrame()) {
@@ -2497,24 +2734,33 @@ DebugEnvironments* DebugEnvironments::ensureCompartmentData(JSContext* cx) {
         frameSlotEnd = scope->nextFrameSlot();
       } else {
         EvalScope* scope = &env->scope().as<EvalScope>();
-        MOZ_ASSERT(scope == frame.script()->bodyScope());
+        MOZ_ASSERT(scope == script->bodyScope());
         frameSlotStart = 0;
         frameSlotEnd = scope->nextFrameSlot();
       }
+    } else {
+      MOZ_ASSERT(&debugEnv->environment().as<ModuleEnvironmentObject>() ==
+                 script->module()->environment());
+      ModuleScope* scope = &script->bodyScope()->as<ModuleScope>();
+      frameSlotStart = 0;
+      frameSlotEnd = scope->nextFrameSlot();
     }
 
     uint32_t frameSlotCount = frameSlotEnd - frameSlotStart;
-    MOZ_ASSERT(frameSlotCount <= frame.script()->nfixed());
+    MOZ_ASSERT(frameSlotCount <= script->nfixed());
 
     if (!vec.resize(frameSlotCount)) {
       cx->recoverFromOutOfMemory();
       return;
     }
-    for (uint32_t slot = frameSlotStart; slot < frameSlotCount; slot++)
+    for (uint32_t slot = frameSlotStart; slot < frameSlotCount; slot++) {
       vec[slot - frameSlotStart].set(frame.unaliasedLocal(slot));
+    }
   }
 
-  if (vec.length() == 0) return;
+  if (vec.length() == 0) {
+    return;
+  }
 
   /*
    * Use a dense array as storage (since proxies do not have trace
@@ -2531,12 +2777,14 @@ DebugEnvironments* DebugEnvironments::ensureCompartmentData(JSContext* cx) {
   debugEnv->initSnapshot(*snapshot);
 }
 
-/* static */ void DebugEnvironments::onPopCall(JSContext* cx,
-                                               AbstractFramePtr frame) {
-  assertSameCompartment(cx, frame);
+/* static */
+void DebugEnvironments::onPopCall(JSContext* cx, AbstractFramePtr frame) {
+  cx->check(frame);
 
-  DebugEnvironments* envs = cx->compartment()->debugEnvs;
-  if (!envs) return;
+  DebugEnvironments* envs = cx->realm()->debugEnvs();
+  if (!envs) {
+    return;
+  }
 
   Rooted<DebugEnvironmentProxy*> debugEnv(cx, nullptr);
 
@@ -2548,14 +2796,19 @@ DebugEnvironments* DebugEnvironments::ensureCompartmentData(JSContext* cx) {
      * The frame may be observed before the prologue has created the
      * CallObject. See EnvironmentIter::settle.
      */
-    if (!frame.environmentChain()->is<CallObject>()) return;
+    if (!frame.environmentChain()->is<CallObject>()) {
+      return;
+    }
 
-    if (frame.callee()->isGenerator() || frame.callee()->isAsync()) return;
+    if (frame.callee()->isGenerator() || frame.callee()->isAsync()) {
+      return;
+    }
 
     CallObject& callobj = frame.environmentChain()->as<CallObject>();
     envs->liveEnvs.remove(&callobj);
-    if (JSObject* obj = envs->proxiedEnvs.lookup(&callobj))
+    if (JSObject* obj = envs->proxiedEnvs.lookup(&callobj)) {
       debugEnv = &obj->as<DebugEnvironmentProxy>();
+    }
   } else {
     MissingEnvironmentKey key(frame, funScope);
     if (MissingEnvironmentMap::Ptr p = envs->missingEnvs.lookup(key)) {
@@ -2565,15 +2818,19 @@ DebugEnvironments* DebugEnvironments::ensureCompartmentData(JSContext* cx) {
     }
   }
 
-  if (debugEnv) DebugEnvironments::takeFrameSnapshot(cx, debugEnv, frame);
+  if (debugEnv) {
+    DebugEnvironments::takeFrameSnapshot(cx, debugEnv, frame);
+  }
 }
 
 void DebugEnvironments::onPopLexical(JSContext* cx, AbstractFramePtr frame,
                                      jsbytecode* pc) {
-  assertSameCompartment(cx, frame);
+  cx->check(frame);
 
-  DebugEnvironments* envs = cx->compartment()->debugEnvs;
-  if (!envs) return;
+  DebugEnvironments* envs = cx->realm()->debugEnvs();
+  if (!envs) {
+    return;
+  }
 
   EnvironmentIter ei(cx, frame, pc);
   onPopLexical(cx, ei);
@@ -2581,8 +2838,10 @@ void DebugEnvironments::onPopLexical(JSContext* cx, AbstractFramePtr frame,
 
 template <typename Environment, typename Scope>
 void DebugEnvironments::onPopGeneric(JSContext* cx, const EnvironmentIter& ei) {
-  DebugEnvironments* envs = cx->compartment()->debugEnvs;
-  if (!envs) return;
+  DebugEnvironments* envs = cx->realm()->debugEnvs();
+  if (!envs) {
+    return;
+  }
 
   MOZ_ASSERT(ei.withinInitialFrame());
   MOZ_ASSERT(ei.scope().is<Scope>());
@@ -2613,30 +2872,39 @@ void DebugEnvironments::onPopLexical(JSContext* cx, const EnvironmentIter& ei) {
 
 void DebugEnvironments::onPopVar(JSContext* cx, AbstractFramePtr frame,
                                  jsbytecode* pc) {
-  assertSameCompartment(cx, frame);
+  cx->check(frame);
 
-  DebugEnvironments* envs = cx->compartment()->debugEnvs;
-  if (!envs) return;
+  DebugEnvironments* envs = cx->realm()->debugEnvs();
+  if (!envs) {
+    return;
+  }
 
   EnvironmentIter ei(cx, frame, pc);
   onPopVar(cx, ei);
 }
 
 void DebugEnvironments::onPopVar(JSContext* cx, const EnvironmentIter& ei) {
-  if (ei.scope().is<EvalScope>())
+  if (ei.scope().is<EvalScope>()) {
     onPopGeneric<VarEnvironmentObject, EvalScope>(cx, ei);
-  else
+  } else {
     onPopGeneric<VarEnvironmentObject, VarScope>(cx, ei);
+  }
 }
 
 void DebugEnvironments::onPopWith(AbstractFramePtr frame) {
-  if (DebugEnvironments* envs = frame.compartment()->debugEnvs)
+  Realm* realm = frame.realm();
+  if (DebugEnvironments* envs = realm->debugEnvs()) {
     envs->liveEnvs.remove(
         &frame.environmentChain()->as<WithEnvironmentObject>());
+  }
 }
 
-void DebugEnvironments::onCompartmentUnsetIsDebuggee(JSCompartment* c) {
-  if (DebugEnvironments* envs = c->debugEnvs) {
+void DebugEnvironments::onPopModule(JSContext* cx, const EnvironmentIter& ei) {
+  onPopGeneric<ModuleEnvironmentObject, ModuleScope>(cx, ei);
+}
+
+void DebugEnvironments::onRealmUnsetIsDebuggee(Realm* realm) {
+  if (DebugEnvironments* envs = realm->debugEnvs()) {
     envs->proxiedEnvs.clear();
     envs->missingEnvs.clear();
     envs->liveEnvs.clear();
@@ -2644,7 +2912,9 @@ void DebugEnvironments::onCompartmentUnsetIsDebuggee(JSCompartment* c) {
 }
 
 bool DebugEnvironments::updateLiveEnvironments(JSContext* cx) {
-  if (!CheckRecursionLimit(cx)) return false;
+  if (!CheckRecursionLimit(cx)) {
+    return false;
+  }
 
   /*
    * Note that we must always update the top frame's environment objects'
@@ -2659,35 +2929,49 @@ bool DebugEnvironments::updateLiveEnvironments(JSContext* cx) {
    * the time when execution resumes fp->prev().
    */
   for (AllFramesIter i(cx); !i.done(); ++i) {
-    if (!i.hasUsableAbstractFramePtr()) continue;
-
-    AbstractFramePtr frame = i.abstractFramePtr();
-    if (frame.environmentChain()->compartment() != cx->compartment()) continue;
-
-    if (frame.isFunctionFrame()) {
-      if (frame.callee()->isGenerator() || frame.callee()->isAsync()) continue;
+    if (!i.hasUsableAbstractFramePtr()) {
+      continue;
     }
 
-    if (!frame.isDebuggee()) continue;
+    AbstractFramePtr frame = i.abstractFramePtr();
+    if (frame.realm() != cx->realm()) {
+      continue;
+    }
+
+    if (frame.isFunctionFrame()) {
+      if (frame.callee()->isGenerator() || frame.callee()->isAsync()) {
+        continue;
+      }
+    }
+
+    if (!frame.isDebuggee()) {
+      continue;
+    }
 
     RootedObject env(cx);
     RootedScope scope(cx);
-    if (!GetFrameEnvironmentAndScope(cx, frame, i.pc(), &env, &scope))
+    if (!GetFrameEnvironmentAndScope(cx, frame, i.pc(), &env, &scope)) {
       return false;
+    }
 
     for (EnvironmentIter ei(cx, env, scope, frame); ei.withinInitialFrame();
          ei++) {
       if (ei.hasSyntacticEnvironment() && !ei.scope().is<GlobalScope>()) {
-        MOZ_ASSERT(ei.environment().compartment() == cx->compartment());
-        DebugEnvironments* envs = ensureCompartmentData(cx);
-        if (!envs) return false;
-        if (!envs->liveEnvs.put(&ei.environment(), LiveEnvironmentVal(ei)))
+        MOZ_ASSERT(ei.environment().realm() == cx->realm());
+        DebugEnvironments* envs = ensureRealmData(cx);
+        if (!envs) {
           return false;
+        }
+        if (!envs->liveEnvs.put(&ei.environment(), LiveEnvironmentVal(ei))) {
+          return false;
+        }
       }
     }
 
-    if (frame.prevUpToDate()) return true;
-    MOZ_ASSERT(frame.environmentChain()->compartment()->isDebuggee());
+    if (frame.prevUpToDate()) {
+      return true;
+    }
+    MOZ_ASSERT(frame.realm()->isDebuggee());
     frame.setPrevUpToDate();
   }
 
@@ -2696,17 +2980,21 @@ bool DebugEnvironments::updateLiveEnvironments(JSContext* cx) {
 
 LiveEnvironmentVal* DebugEnvironments::hasLiveEnvironment(
     EnvironmentObject& env) {
-  DebugEnvironments* envs = env.compartment()->debugEnvs;
-  if (!envs) return nullptr;
+  DebugEnvironments* envs = env.realm()->debugEnvs();
+  if (!envs) {
+    return nullptr;
+  }
 
-  if (LiveEnvironmentMap::Ptr p = envs->liveEnvs.lookup(&env))
+  if (LiveEnvironmentMap::Ptr p = envs->liveEnvs.lookup(&env)) {
     return &p->value();
+  }
 
   return nullptr;
 }
 
-/* static */ void DebugEnvironments::unsetPrevUpToDateUntil(
-    JSContext* cx, AbstractFramePtr until) {
+/* static */
+void DebugEnvironments::unsetPrevUpToDateUntil(JSContext* cx,
+                                               AbstractFramePtr until) {
   // This are two exceptions where fp->prevUpToDate() is cleared without
   // popping the frame. When a frame is rematerialized or has its
   // debuggeeness toggled off->on, all frames younger than the frame must
@@ -2716,22 +3004,30 @@ LiveEnvironmentVal* DebugEnvironments::hasLiveEnvironment(
   // rematerialization or becomes a debuggee, the prevUpToDate invariant
   // will no longer hold for older frames on its stack.
   for (AllFramesIter i(cx); !i.done(); ++i) {
-    if (!i.hasUsableAbstractFramePtr()) continue;
+    if (!i.hasUsableAbstractFramePtr()) {
+      continue;
+    }
 
     AbstractFramePtr frame = i.abstractFramePtr();
-    if (frame == until) return;
+    if (frame == until) {
+      return;
+    }
 
-    if (frame.environmentChain()->compartment() != cx->compartment()) continue;
+    if (frame.realm() != cx->realm()) {
+      continue;
+    }
 
     frame.unsetPrevUpToDate();
   }
 }
 
-/* static */ void DebugEnvironments::forwardLiveFrame(JSContext* cx,
-                                                      AbstractFramePtr from,
-                                                      AbstractFramePtr to) {
-  DebugEnvironments* envs = cx->compartment()->debugEnvs;
-  if (!envs) return;
+/* static */
+void DebugEnvironments::forwardLiveFrame(JSContext* cx, AbstractFramePtr from,
+                                         AbstractFramePtr to) {
+  DebugEnvironments* envs = cx->realm()->debugEnvs();
+  if (!envs) {
+    return;
+  }
 
   for (MissingEnvironmentMap::Enum e(envs->missingEnvs); !e.empty();
        e.popFront()) {
@@ -2744,15 +3040,18 @@ LiveEnvironmentVal* DebugEnvironments::hasLiveEnvironment(
 
   for (LiveEnvironmentMap::Enum e(envs->liveEnvs); !e.empty(); e.popFront()) {
     LiveEnvironmentVal& val = e.front().value();
-    if (val.frame() == from) val.updateFrame(to);
+    if (val.frame() == from) {
+      val.updateFrame(to);
+    }
   }
 }
 
-/* static */ void DebugEnvironments::traceLiveFrame(JSTracer* trc,
-                                                    AbstractFramePtr frame) {
+/* static */
+void DebugEnvironments::traceLiveFrame(JSTracer* trc, AbstractFramePtr frame) {
   for (MissingEnvironmentMap::Enum e(missingEnvs); !e.empty(); e.popFront()) {
-    if (e.front().key().frame() == frame)
+    if (e.front().key().frame() == frame) {
       TraceEdge(trc, &e.front().value(), "debug-env-live-frame-missing-env");
+    }
   }
 }
 
@@ -2764,19 +3063,25 @@ static DebugEnvironmentProxy* GetDebugEnvironmentForEnvironmentObject(
     JSContext* cx, const EnvironmentIter& ei) {
   Rooted<EnvironmentObject*> env(cx, &ei.environment());
   if (DebugEnvironmentProxy* debugEnv =
-          DebugEnvironments::hasDebugEnvironment(cx, *env))
+          DebugEnvironments::hasDebugEnvironment(cx, *env)) {
     return debugEnv;
+  }
 
   EnvironmentIter copy(cx, ei);
   RootedObject enclosingDebug(cx, GetDebugEnvironment(cx, ++copy));
-  if (!enclosingDebug) return nullptr;
+  if (!enclosingDebug) {
+    return nullptr;
+  }
 
   Rooted<DebugEnvironmentProxy*> debugEnv(
       cx, DebugEnvironmentProxy::create(cx, *env, enclosingDebug));
-  if (!debugEnv) return nullptr;
-
-  if (!DebugEnvironments::addDebugEnvironment(cx, env, debugEnv))
+  if (!debugEnv) {
     return nullptr;
+  }
+
+  if (!DebugEnvironments::addDebugEnvironment(cx, env, debugEnv)) {
+    return nullptr;
+  }
 
   return debugEnv;
 }
@@ -2789,12 +3094,15 @@ static DebugEnvironmentProxy* GetDebugEnvironmentForMissing(
               ei.scope().is<WasmFunctionScope>() || ei.scope().is<VarScope>()));
 
   if (DebugEnvironmentProxy* debugEnv =
-          DebugEnvironments::hasDebugEnvironment(cx, ei))
+          DebugEnvironments::hasDebugEnvironment(cx, ei)) {
     return debugEnv;
+  }
 
   EnvironmentIter copy(cx, ei);
   RootedObject enclosingDebug(cx, GetDebugEnvironment(cx, ++copy));
-  if (!enclosingDebug) return nullptr;
+  if (!enclosingDebug) {
+    return nullptr;
+  }
 
   /*
    * Create the missing environment object. For lexical environment objects,
@@ -2818,14 +3126,18 @@ static DebugEnvironmentProxy* GetDebugEnvironmentForMissing(
     JS::ExposeObjectToActiveJS(callee);
     Rooted<CallObject*> callobj(cx,
                                 CallObject::createHollowForDebug(cx, callee));
-    if (!callobj) return nullptr;
+    if (!callobj) {
+      return nullptr;
+    }
 
     debugEnv = DebugEnvironmentProxy::create(cx, *callobj, enclosingDebug);
   } else if (ei.scope().is<LexicalScope>()) {
     Rooted<LexicalScope*> lexicalScope(cx, &ei.scope().as<LexicalScope>());
     Rooted<LexicalEnvironmentObject*> env(
         cx, LexicalEnvironmentObject::createHollowForDebug(cx, lexicalScope));
-    if (!env) return nullptr;
+    if (!env) {
+      return nullptr;
+    }
 
     debugEnv = DebugEnvironmentProxy::create(cx, *env, enclosingDebug);
   } else if (ei.scope().is<WasmInstanceScope>()) {
@@ -2834,7 +3146,9 @@ static DebugEnvironmentProxy* GetDebugEnvironmentForMissing(
     Rooted<WasmInstanceEnvironmentObject*> env(
         cx, WasmInstanceEnvironmentObject::createHollowForDebug(
                 cx, wasmInstanceScope));
-    if (!env) return nullptr;
+    if (!env) {
+      return nullptr;
+    }
 
     debugEnv = DebugEnvironmentProxy::create(cx, *env, enclosingDebug);
   } else if (ei.scope().is<WasmFunctionScope>()) {
@@ -2845,21 +3159,29 @@ static DebugEnvironmentProxy* GetDebugEnvironmentForMissing(
     Rooted<WasmFunctionCallObject*> callobj(
         cx, WasmFunctionCallObject::createHollowForDebug(cx, enclosing,
                                                          wasmFunctionScope));
-    if (!callobj) return nullptr;
+    if (!callobj) {
+      return nullptr;
+    }
 
     debugEnv = DebugEnvironmentProxy::create(cx, *callobj, enclosingDebug);
   } else {
     Rooted<VarScope*> varScope(cx, &ei.scope().as<VarScope>());
     Rooted<VarEnvironmentObject*> env(
         cx, VarEnvironmentObject::createHollowForDebug(cx, varScope));
-    if (!env) return nullptr;
+    if (!env) {
+      return nullptr;
+    }
 
     debugEnv = DebugEnvironmentProxy::create(cx, *env, enclosingDebug);
   }
 
-  if (!debugEnv) return nullptr;
+  if (!debugEnv) {
+    return nullptr;
+  }
 
-  if (!DebugEnvironments::addDebugEnvironment(cx, ei, debugEnv)) return nullptr;
+  if (!DebugEnvironments::addDebugEnvironment(cx, ei, debugEnv)) {
+    return nullptr;
+  }
 
   return debugEnv;
 }
@@ -2869,19 +3191,25 @@ static JSObject* GetDebugEnvironmentForNonEnvironmentObject(
   JSObject& enclosing = ei.enclosingEnvironment();
 #ifdef DEBUG
   JSObject* o = &enclosing;
-  while ((o = o->enclosingEnvironment()))
+  while ((o = o->enclosingEnvironment())) {
     MOZ_ASSERT(!o->is<EnvironmentObject>());
+  }
 #endif
   return &enclosing;
 }
 
 static JSObject* GetDebugEnvironment(JSContext* cx, const EnvironmentIter& ei) {
-  if (!CheckRecursionLimit(cx)) return nullptr;
+  if (!CheckRecursionLimit(cx)) {
+    return nullptr;
+  }
 
-  if (ei.done()) return GetDebugEnvironmentForNonEnvironmentObject(ei);
+  if (ei.done()) {
+    return GetDebugEnvironmentForNonEnvironmentObject(ei);
+  }
 
-  if (ei.hasAnyEnvironmentObject())
+  if (ei.hasAnyEnvironmentObject()) {
     return GetDebugEnvironmentForEnvironmentObject(cx, ei);
+  }
 
   if (ei.scope().is<FunctionScope>() || ei.scope().is<LexicalScope>() ||
       ei.scope().is<WasmInstanceScope>() ||
@@ -2895,25 +3223,32 @@ static JSObject* GetDebugEnvironment(JSContext* cx, const EnvironmentIter& ei) {
 
 JSObject* js::GetDebugEnvironmentForFunction(JSContext* cx,
                                              HandleFunction fun) {
-  assertSameCompartment(cx, fun);
+  cx->check(fun);
   MOZ_ASSERT(CanUseDebugEnvironmentMaps(cx));
-  if (!DebugEnvironments::updateLiveEnvironments(cx)) return nullptr;
+  if (!DebugEnvironments::updateLiveEnvironments(cx)) {
+    return nullptr;
+  }
   JSScript* script = JSFunction::getOrCreateScript(cx, fun);
-  if (!script) return nullptr;
+  if (!script) {
+    return nullptr;
+  }
   EnvironmentIter ei(cx, fun->environment(), script->enclosingScope());
   return GetDebugEnvironment(cx, ei);
 }
 
 JSObject* js::GetDebugEnvironmentForFrame(JSContext* cx, AbstractFramePtr frame,
                                           jsbytecode* pc) {
-  assertSameCompartment(cx, frame);
+  cx->check(frame);
   if (CanUseDebugEnvironmentMaps(cx) &&
-      !DebugEnvironments::updateLiveEnvironments(cx))
+      !DebugEnvironments::updateLiveEnvironments(cx)) {
     return nullptr;
+  }
 
   RootedObject env(cx);
   RootedScope scope(cx);
-  if (!GetFrameEnvironmentAndScope(cx, frame, pc, &env, &scope)) return nullptr;
+  if (!GetFrameEnvironmentAndScope(cx, frame, pc, &env, &scope)) {
+    return nullptr;
+  }
 
   EnvironmentIter ei(cx, env, scope, frame);
   return GetDebugEnvironment(cx, ei);
@@ -2926,12 +3261,12 @@ JSObject* js::GetDebugEnvironmentForGlobalLexicalEnvironment(JSContext* cx) {
 }
 
 bool js::CreateObjectsForEnvironmentChain(JSContext* cx,
-                                          AutoObjectVector& chain,
+                                          HandleObjectVector chain,
                                           HandleObject terminatingEnv,
                                           MutableHandleObject envObj) {
 #ifdef DEBUG
   for (size_t i = 0; i < chain.length(); ++i) {
-    assertSameCompartment(cx, chain[i]);
+    cx->check(chain[i]);
     MOZ_ASSERT(!chain[i]->is<GlobalObject>() &&
                !chain[i]->is<NonSyntacticVariablesObject>());
   }
@@ -2944,7 +3279,9 @@ bool js::CreateObjectsForEnvironmentChain(JSContext* cx,
   for (size_t i = chain.length(); i > 0;) {
     withEnv =
         WithEnvironmentObject::createNonSyntactic(cx, chain[--i], enclosingEnv);
-    if (!withEnv) return false;
+    if (!withEnv) {
+      return false;
+    }
     enclosingEnv = withEnv;
   }
 
@@ -2972,9 +3309,19 @@ WithScope& WithEnvironmentObject::scope() const {
 }
 
 ModuleEnvironmentObject* js::GetModuleEnvironmentForScript(JSScript* script) {
+  ModuleObject* module = GetModuleObjectForScript(script);
+  if (!module) {
+    return nullptr;
+  }
+
+  return module->environment();
+}
+
+ModuleObject* js::GetModuleObjectForScript(JSScript* script) {
   for (ScopeIter si(script); si; si++) {
-    if (si.kind() == ScopeKind::Module)
-      return si.scope()->as<ModuleScope>().module()->environment();
+    if (si.kind() == ScopeKind::Module) {
+      return si.scope()->as<ModuleScope>().module();
+    }
   }
   return nullptr;
 }
@@ -2985,8 +3332,9 @@ bool js::GetThisValueForDebuggerMaybeOptimizedOut(JSContext* cx,
                                                   MutableHandleValue res) {
   RootedObject scopeChain(cx);
   RootedScope scope(cx);
-  if (!GetFrameEnvironmentAndScope(cx, frame, pc, &scopeChain, &scope))
+  if (!GetFrameEnvironmentAndScope(cx, frame, pc, &scopeChain, &scope)) {
     return false;
+  }
 
   for (EnvironmentIter ei(cx, scopeChain, scope, frame); ei; ei++) {
     if (ei.scope().kind() == ScopeKind::Module) {
@@ -3030,7 +3378,9 @@ bool js::GetThisValueForDebuggerMaybeOptimizedOut(JSContext* cx,
       // correct |this| value for this frame (box primitives if not
       // in strict mode), and assign it to the this-argument slot so
       // JSOP_FUNCTIONTHIS will use it and not box a second time.
-      if (!GetFunctionThis(cx, frame, res)) return false;
+      if (!GetFunctionThis(cx, frame, res)) {
+        return false;
+      }
       frame.thisArgument() = res;
       return true;
     }
@@ -3041,7 +3391,9 @@ bool js::GetThisValueForDebuggerMaybeOptimizedOut(JSContext* cx,
     }
 
     for (Rooted<BindingIter> bi(cx, BindingIter(script)); bi; bi++) {
-      if (bi.name() != cx->names().dotThis) continue;
+      if (bi.name() != cx->names().dotThis) {
+        continue;
+      }
 
       BindingLocation loc = bi.location();
       if (loc.kind() == BindingLocation::Kind::Environment) {
@@ -3050,10 +3402,12 @@ bool js::GetThisValueForDebuggerMaybeOptimizedOut(JSContext* cx,
                            res);
       }
 
-      if (loc.kind() == BindingLocation::Kind::Frame && ei.withinInitialFrame())
+      if (loc.kind() == BindingLocation::Kind::Frame &&
+          ei.withinInitialFrame()) {
         res.set(frame.unaliasedLocal(loc.slot()));
-      else
+      } else {
         res.setMagic(JS_OPTIMIZED_OUT);
+      }
 
       return true;
     }
@@ -3072,7 +3426,8 @@ bool js::CheckLexicalNameConflict(JSContext* cx,
   const char* redeclKind = nullptr;
   RootedId id(cx, NameToId(name));
   RootedShape shape(cx);
-  if (varObj->is<GlobalObject>() && varObj->compartment()->isInVarNames(name)) {
+  if (varObj->is<GlobalObject>() &&
+      varObj->as<GlobalObject>().realm()->isInVarNames(name)) {
     // ES 15.1.11 step 5.a
     redeclKind = "var";
   } else if ((shape = lexicalEnv->lookup(cx, name))) {
@@ -3082,13 +3437,18 @@ bool js::CheckLexicalNameConflict(JSContext* cx,
              (shape = varObj->as<NativeObject>().lookup(cx, name))) {
     // Faster path for ES 15.1.11 step 5.c-d when the shape can be found
     // without going through a resolve hook.
-    if (!shape->configurable()) redeclKind = "non-configurable global property";
+    if (!shape->configurable()) {
+      redeclKind = "non-configurable global property";
+    }
   } else {
     // ES 15.1.11 step 5.c-d
     Rooted<PropertyDescriptor> desc(cx);
-    if (!GetOwnPropertyDescriptor(cx, varObj, id, &desc)) return false;
-    if (desc.object() && desc.hasConfigurable() && !desc.configurable())
+    if (!GetOwnPropertyDescriptor(cx, varObj, id, &desc)) {
+      return false;
+    }
+    if (desc.object() && desc.hasConfigurable() && !desc.configurable()) {
       redeclKind = "non-configurable global property";
+    }
   }
 
   if (redeclKind) {
@@ -3112,11 +3472,10 @@ bool js::CheckVarNameConflict(JSContext* cx,
 static void ReportCannotDeclareGlobalBinding(JSContext* cx,
                                              HandlePropertyName name,
                                              const char* reason) {
-  JSAutoByteString printable;
-  if (AtomToPrintableString(cx, name, &printable)) {
-    JS_ReportErrorNumberLatin1(cx, GetErrorMessage, nullptr,
-                               JSMSG_CANT_DECLARE_GLOBAL_BINDING,
-                               printable.ptr(), reason);
+  if (UniqueChars printable = AtomToPrintableString(cx, name)) {
+    JS_ReportErrorNumberASCII(cx, GetErrorMessage, nullptr,
+                              JSMSG_CANT_DECLARE_GLOBAL_BINDING,
+                              printable.get(), reason);
   }
 }
 
@@ -3126,7 +3485,9 @@ bool js::CheckCanDeclareGlobalBinding(JSContext* cx,
                                       bool isFunction) {
   RootedId id(cx, NameToId(name));
   Rooted<PropertyDescriptor> desc(cx);
-  if (!GetOwnPropertyDescriptor(cx, global, id, &desc)) return false;
+  if (!GetOwnPropertyDescriptor(cx, global, id, &desc)) {
+    return false;
+  }
 
   // ES 8.1.1.4.15 CanDeclareGlobalVar
   // ES 8.1.1.4.16 CanDeclareGlobalFunction
@@ -3135,7 +3496,9 @@ bool js::CheckCanDeclareGlobalBinding(JSContext* cx,
   if (!desc.object()) {
     // 8.1.14.15 step 6.
     // 8.1.14.16 step 5.
-    if (global->nonProxyIsExtensible()) return true;
+    if (global->isExtensible()) {
+      return true;
+    }
 
     ReportCannotDeclareGlobalBinding(cx, name, "global is non-extensible");
     return false;
@@ -3144,11 +3507,14 @@ bool js::CheckCanDeclareGlobalBinding(JSContext* cx,
   // Global functions have additional restrictions.
   if (isFunction) {
     // 8.1.14.16 step 6.
-    if (desc.configurable()) return true;
+    if (desc.configurable()) {
+      return true;
+    }
 
     // 8.1.14.16 step 7.
-    if (desc.isDataDescriptor() && desc.writable() && desc.enumerable())
+    if (desc.isDataDescriptor() && desc.writable() && desc.enumerable()) {
       return true;
+    }
 
     ReportCannotDeclareGlobalBinding(cx, name,
                                      "property must be configurable or "
@@ -3178,9 +3544,13 @@ bool js::CheckGlobalDeclarationConflicts(
   // Check 'var' declarations do not conflict with existing bindings in the
   // global lexical environment.
   for (; bi; bi++) {
-    if (bi.kind() != BindingKind::Var) break;
+    if (bi.kind() != BindingKind::Var) {
+      break;
+    }
     name = bi.name()->asPropertyName();
-    if (!CheckVarNameConflict(cx, lexicalEnv, name)) return false;
+    if (!CheckVarNameConflict(cx, lexicalEnv, name)) {
+      return false;
+    }
 
     // Step 10 and 12.
     //
@@ -3188,8 +3558,9 @@ bool js::CheckGlobalDeclarationConflicts(
     if (varObj->is<GlobalObject>()) {
       Handle<GlobalObject*> global = varObj.as<GlobalObject>();
       if (!CheckCanDeclareGlobalBinding(cx, global, name,
-                                        bi.isTopLevelFunction()))
+                                        bi.isTopLevelFunction())) {
         return false;
+      }
     }
   }
 
@@ -3198,7 +3569,9 @@ bool js::CheckGlobalDeclarationConflicts(
   // Check that lexical bindings do not conflict.
   for (; bi; bi++) {
     name = bi.name()->asPropertyName();
-    if (!CheckLexicalNameConflict(cx, lexicalEnv, varObj, name)) return false;
+    if (!CheckLexicalNameConflict(cx, lexicalEnv, varObj, name)) {
+      return false;
+    }
   }
 
   return true;
@@ -3234,16 +3607,20 @@ static bool CheckVarNameConflictsInEnv(JSContext* cx, HandleScript script,
   RootedPropertyName name(cx);
   for (BindingIter bi(script); bi; bi++) {
     name = bi.name()->asPropertyName();
-    if (!CheckVarNameConflict(cx, env, name)) return false;
+    if (!CheckVarNameConflict(cx, env, name)) {
+      return false;
+    }
   }
 
   return true;
 }
 
-bool js::CheckEvalDeclarationConflicts(JSContext* cx, HandleScript script,
-                                       HandleObject scopeChain,
-                                       HandleObject varObj) {
-  if (!script->bodyScope()->as<EvalScope>().hasBindings()) return true;
+static bool CheckEvalDeclarationConflicts(JSContext* cx, HandleScript script,
+                                          HandleObject scopeChain,
+                                          HandleObject varObj) {
+  if (!script->bodyScope()->as<EvalScope>().hasBindings()) {
+    return true;
+  }
 
   RootedObject obj(cx, scopeChain);
 
@@ -3254,7 +3631,9 @@ bool js::CheckEvalDeclarationConflicts(JSContext* cx, HandleScript script,
   // Check that a direct eval will not hoist 'var' bindings over lexical
   // bindings with the same name.
   while (obj != varObj) {
-    if (!CheckVarNameConflictsInEnv(cx, script, obj)) return false;
+    if (!CheckVarNameConflictsInEnv(cx, script, obj)) {
+      return false;
+    }
     obj = obj->enclosingEnvironment();
   }
 
@@ -3267,8 +3646,42 @@ bool js::CheckEvalDeclarationConflicts(JSContext* cx, HandleScript script,
     for (Rooted<BindingIter> bi(cx, BindingIter(script)); bi; bi++) {
       name = bi.name()->asPropertyName();
       if (!CheckCanDeclareGlobalBinding(cx, global, name,
-                                        bi.isTopLevelFunction()))
+                                        bi.isTopLevelFunction())) {
         return false;
+      }
+    }
+  }
+
+  return true;
+}
+
+bool js::CheckGlobalOrEvalDeclarationConflicts(JSContext* cx,
+                                               HandleObject envChain,
+                                               HandleScript script) {
+  MOZ_ASSERT(script->isGlobalCode() || script->isForEval());
+
+  RootedObject varObj(cx, &GetVariablesObject(envChain));
+
+  if (script->isForEval()) {
+    // Strict eval and eval in parameter default expressions have their
+    // own call objects.
+    //
+    // Non-strict eval may introduce 'var' bindings that conflict with
+    // lexical bindings in an enclosing lexical scope.
+    if (!script->bodyScope()->hasEnvironment()) {
+      MOZ_ASSERT(
+          !script->strict() &&
+          (!script->enclosingScope()->is<FunctionScope>() ||
+           !script->enclosingScope()->as<FunctionScope>().hasParameterExprs()));
+      if (!CheckEvalDeclarationConflicts(cx, script, envChain, varObj)) {
+        return false;
+      }
+    }
+  } else {
+    Rooted<LexicalEnvironmentObject*> lexicalEnv(
+        cx, &NearestEnclosingExtensibleLexicalEnvironment(envChain));
+    if (!CheckGlobalDeclarationConflicts(cx, script, lexicalEnv, varObj)) {
+      return false;
     }
   }
 
@@ -3283,16 +3696,10 @@ bool js::InitFunctionEnvironmentObjects(JSContext* cx, AbstractFramePtr frame) {
 
   // Named lambdas may have an environment that holds itself for recursion.
   if (callee->needsNamedLambdaEnvironment()) {
-    NamedLambdaObject* declEnv;
-    if (callee->isAsync()) {
-      // Named async function needs special environment to return
-      // wrapped function for the binding.
-      RootedFunction fun(cx, GetWrappedAsyncFunction(callee));
-      declEnv = NamedLambdaObject::create(cx, frame, fun);
-    } else {
-      declEnv = NamedLambdaObject::create(cx, frame);
+    NamedLambdaObject* declEnv = NamedLambdaObject::create(cx, frame);
+    if (!declEnv) {
+      return false;
     }
-    if (!declEnv) return false;
     frame.pushOnEnvironmentChain(*declEnv);
   }
 
@@ -3300,7 +3707,9 @@ bool js::InitFunctionEnvironmentObjects(JSContext* cx, AbstractFramePtr frame) {
   // extra environment to hold the parameters.
   if (callee->needsCallObject()) {
     CallObject* callObj = CallObject::create(cx, frame);
-    if (!callObj) return false;
+    if (!callObj) {
+      return false;
+    }
     frame.pushOnEnvironmentChain(*callObj);
   }
 
@@ -3310,7 +3719,9 @@ bool js::InitFunctionEnvironmentObjects(JSContext* cx, AbstractFramePtr frame) {
 bool js::PushVarEnvironmentObject(JSContext* cx, HandleScope scope,
                                   AbstractFramePtr frame) {
   VarEnvironmentObject* env = VarEnvironmentObject::create(cx, scope, frame);
-  if (!env) return false;
+  if (!env) {
+    return false;
+  }
   frame.pushOnEnvironmentChain(*env);
   return true;
 }
@@ -3324,7 +3735,9 @@ bool js::GetFrameEnvironmentAndScope(JSContext* cx, AbstractFramePtr frame,
     RootedWasmInstanceObject instance(cx, frame.wasmInstance()->object());
     uint32_t funcIndex = frame.asWasmDebugFrame()->funcIndex();
     scope.set(WasmInstanceObject::getFunctionScope(cx, instance, funcIndex));
-    if (!scope) return false;
+    if (!scope) {
+      return false;
+    }
   } else {
     scope.set(frame.script()->innermostScope(pc));
   }
@@ -3365,16 +3778,16 @@ static bool RemoveReferencedNames(JSContext* cx, HandleScript script,
       case JSOP_GETGNAME:
       case JSOP_SETGNAME:
       case JSOP_STRICTSETGNAME:
-        if (script->hasNonSyntacticScope())
+        if (script->hasNonSyntacticScope()) {
           name = script->getName(pc);
-        else
+        } else {
           name = nullptr;
+        }
         break;
 
       case JSOP_GETALIASEDVAR:
       case JSOP_SETALIASEDVAR:
-        name = EnvironmentCoordinateName(cx->caches().envCoordinateNameCache,
-                                         script, pc);
+        name = EnvironmentCoordinateNameSlow(script, pc);
         break;
 
       default:
@@ -3382,22 +3795,25 @@ static bool RemoveReferencedNames(JSContext* cx, HandleScript script,
         break;
     }
 
-    if (name) remainingNames.remove(name);
+    if (name) {
+      remainingNames.remove(name);
+    }
   }
 
   if (script->hasObjects()) {
-    ObjectArray* objects = script->objects();
     RootedFunction fun(cx);
     RootedScript innerScript(cx);
-    for (size_t i = 0; i < objects->length; i++) {
-      JSObject* obj = objects->vector[i];
+    for (JSObject* obj : script->objects()) {
       if (obj->is<JSFunction>() && obj->as<JSFunction>().isInterpreted()) {
         fun = &obj->as<JSFunction>();
         innerScript = JSFunction::getOrCreateScript(cx, fun);
-        if (!innerScript) return false;
-
-        if (!RemoveReferencedNames(cx, innerScript, remainingNames))
+        if (!innerScript) {
           return false;
+        }
+
+        if (!RemoveReferencedNames(cx, innerScript, remainingNames)) {
+          return false;
+        }
       }
     }
   }
@@ -3409,21 +3825,26 @@ static bool AnalyzeEntrainedVariablesInScript(JSContext* cx,
                                               HandleScript script,
                                               HandleScript innerScript) {
   PropertyNameSet remainingNames(cx);
-  if (!remainingNames.init()) return false;
 
   for (BindingIter bi(script); bi; bi++) {
     if (bi.closedOver()) {
       PropertyName* name = bi.name()->asPropertyName();
       PropertyNameSet::AddPtr p = remainingNames.lookupForAdd(name);
-      if (!p && !remainingNames.add(p, name)) return false;
+      if (!p && !remainingNames.add(p, name)) {
+        return false;
+      }
     }
   }
 
-  if (!RemoveReferencedNames(cx, innerScript, remainingNames)) return false;
+  if (!RemoveReferencedNames(cx, innerScript, remainingNames)) {
+    return false;
+  }
 
   if (!remainingNames.empty()) {
     Sprinter buf(cx);
-    if (!buf.init()) return false;
+    if (!buf.init()) {
+      return false;
+    }
 
     buf.printf("Script ");
 
@@ -3432,7 +3853,7 @@ static bool AnalyzeEntrainedVariablesInScript(JSContext* cx,
       buf.printf(" ");
     }
 
-    buf.printf("(%s:%zu) has variables entrained by ", script->filename(),
+    buf.printf("(%s:%u) has variables entrained by ", script->filename(),
                script->lineno());
 
     if (JSAtom* name = innerScript->functionNonDelazifying()->displayAtom()) {
@@ -3440,7 +3861,7 @@ static bool AnalyzeEntrainedVariablesInScript(JSContext* cx,
       buf.printf(" ");
     }
 
-    buf.printf("(%s:%zu) ::", innerScript->filename(), innerScript->lineno());
+    buf.printf("(%s:%u) ::", innerScript->filename(), innerScript->lineno());
 
     for (PropertyNameSet::Range r = remainingNames.all(); !r.empty();
          r.popFront()) {
@@ -3452,11 +3873,9 @@ static bool AnalyzeEntrainedVariablesInScript(JSContext* cx,
   }
 
   if (innerScript->hasObjects()) {
-    ObjectArray* objects = innerScript->objects();
     RootedFunction fun(cx);
     RootedScript innerInnerScript(cx);
-    for (size_t i = 0; i < objects->length; i++) {
-      JSObject* obj = objects->vector[i];
+    for (JSObject* obj : script->objects()) {
       if (obj->is<JSFunction>() && obj->as<JSFunction>().isInterpreted()) {
         fun = &obj->as<JSFunction>();
         innerInnerScript = JSFunction::getOrCreateScript(cx, fun);
@@ -3483,25 +3902,30 @@ static bool AnalyzeEntrainedVariablesInScript(JSContext* cx,
 //
 // |bar| unnecessarily entrains |b|, and |baz| unnecessarily entrains |a|.
 bool js::AnalyzeEntrainedVariables(JSContext* cx, HandleScript script) {
-  if (!script->hasObjects()) return true;
+  if (!script->hasObjects()) {
+    return true;
+  }
 
-  ObjectArray* objects = script->objects();
   RootedFunction fun(cx);
   RootedScript innerScript(cx);
-  for (size_t i = 0; i < objects->length; i++) {
-    JSObject* obj = objects->vector[i];
+  for (JSObject* obj : script->objects()) {
     if (obj->is<JSFunction>() && obj->as<JSFunction>().isInterpreted()) {
       fun = &obj->as<JSFunction>();
       innerScript = JSFunction::getOrCreateScript(cx, fun);
-      if (!innerScript) return false;
+      if (!innerScript) {
+        return false;
+      }
 
       if (script->functionDelazifying() &&
           script->functionDelazifying()->needsCallObject()) {
-        if (!AnalyzeEntrainedVariablesInScript(cx, script, innerScript))
+        if (!AnalyzeEntrainedVariablesInScript(cx, script, innerScript)) {
           return false;
+        }
       }
 
-      if (!AnalyzeEntrainedVariables(cx, innerScript)) return false;
+      if (!AnalyzeEntrainedVariables(cx, innerScript)) {
+        return false;
+      }
     }
   }
 

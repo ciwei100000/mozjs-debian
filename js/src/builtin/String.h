@@ -1,5 +1,5 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
- * vim: set ts=8 sts=4 et sw=4 tw=99:
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+ * vim: set ts=8 sts=2 et sw=2 tw=80:
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -24,8 +24,10 @@
 
 namespace js {
 
+class GlobalObject;
+
 /* Initialize the String class, returning its prototype object. */
-extern JSObject* InitStringClass(JSContext* cx, HandleObject obj);
+extern JSObject* InitStringClass(JSContext* cx, Handle<GlobalObject*> global);
 
 extern bool str_fromCharCode(JSContext* cx, unsigned argc, Value* vp);
 
@@ -37,8 +39,7 @@ extern bool str_fromCodePoint(JSContext* cx, unsigned argc, Value* vp);
 extern bool str_fromCodePoint_one_arg(JSContext* cx, HandleValue code,
                                       MutableHandleValue rval);
 
-/* String methods exposed so they can be installed in the self-hosting global.
- */
+// String methods exposed so they can be installed in the self-hosting global.
 
 extern bool str_includes(JSContext* cx, unsigned argc, Value* vp);
 
@@ -136,11 +137,11 @@ extern bool str_localeCompare(JSContext* cx, unsigned argc, Value* vp);
 
 extern bool str_concat(JSContext* cx, unsigned argc, Value* vp);
 
-ArrayObject* str_split_string(JSContext* cx, HandleObjectGroup group,
-                              HandleString str, HandleString sep,
-                              uint32_t limit);
+ArrayObject* StringSplitString(JSContext* cx, HandleObjectGroup group,
+                               HandleString str, HandleString sep,
+                               uint32_t limit);
 
-JSString* str_flat_replace_string(JSContext* cx, HandleString string,
+JSString* StringFlatReplaceString(JSContext* cx, HandleString string,
                                   HandleString pattern,
                                   HandleString replacement);
 

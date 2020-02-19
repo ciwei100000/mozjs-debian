@@ -1,5 +1,5 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
- * vim: set ts=8 sts=4 et sw=4 tw=99:
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+ * vim: set ts=8 sts=2 et sw=2 tw=80:
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -11,19 +11,19 @@
 
 #include "jit/IonTypes.h"
 #if defined(JS_CODEGEN_X86) || defined(JS_CODEGEN_X64)
-#include "jit/x86-shared/Architecture-x86-shared.h"
+#  include "jit/x86-shared/Architecture-x86-shared.h"
 #elif defined(JS_CODEGEN_ARM)
-#include "jit/arm/Architecture-arm.h"
+#  include "jit/arm/Architecture-arm.h"
 #elif defined(JS_CODEGEN_ARM64)
-#include "jit/arm64/Architecture-arm64.h"
+#  include "jit/arm64/Architecture-arm64.h"
 #elif defined(JS_CODEGEN_MIPS32)
-#include "jit/mips32/Architecture-mips32.h"
+#  include "jit/mips32/Architecture-mips32.h"
 #elif defined(JS_CODEGEN_MIPS64)
-#include "jit/mips64/Architecture-mips64.h"
+#  include "jit/mips64/Architecture-mips64.h"
 #elif defined(JS_CODEGEN_NONE)
-#include "jit/none/Architecture-none.h"
+#  include "jit/none/Architecture-none.h"
 #else
-#error "Unknown architecture!"
+#  error "Unknown architecture!"
 #endif
 
 namespace js {
@@ -67,12 +67,9 @@ struct Register {
   bool aliases(const Register& other) const { return reg_ == other.reg_; }
   uint32_t numAliased() const { return 1; }
 
-  // N.B. FloatRegister is an explicit outparam here because msvc-2010
-  // miscompiled it on win64 when the value was simply returned.  This
-  // now has an explicit outparam for compatability.
-  void aliased(uint32_t aliasIdx, Register* ret) const {
+  Register aliased(uint32_t aliasIdx) const {
     MOZ_ASSERT(aliasIdx == 0);
-    *ret = *this;
+    return *this;
   }
 
   SetType alignedOrDominatedAliasedSet() const { return SetType(1) << code(); }
@@ -102,7 +99,7 @@ struct Register {
 struct RegisterOrSP {
   // The register code -- but possibly one that cannot be represented as a bit
   // position in a 32-bit vector.
-  const uint32_t code;
+  uint32_t code;
 
   explicit RegisterOrSP(uint32_t code) : code(code) {}
   explicit RegisterOrSP(Register r) : code(r.code()) {}
@@ -116,6 +113,8 @@ static inline Register AsRegister(RegisterOrSP r) {
   MOZ_ASSERT(!IsHiddenSP(r));
   return Register::FromCode(r.code);
 }
+
+static inline Register AsRegister(Register r) { return r; }
 
 inline bool operator==(Register r, RegisterOrSP e) {
   return r.code() == e.code;
@@ -229,11 +228,13 @@ class MachineState {
  public:
   MachineState() {
 #ifndef JS_CODEGEN_NONE
-    for (uintptr_t i = 0; i < Registers::Total; i++)
+    for (uintptr_t i = 0; i < Registers::Total; i++) {
       regs_[i] = reinterpret_cast<Registers::RegisterContent*>(i + 0x100);
-    for (uintptr_t i = 0; i < FloatRegisters::Total; i++)
+    }
+    for (uintptr_t i = 0; i < FloatRegisters::Total; i++) {
       fpregs_[i] =
           reinterpret_cast<FloatRegisters::RegisterContent*>(i + 0x200);
+    }
 #endif
   }
 
@@ -261,6 +262,9 @@ class MachineState {
   double read(FloatRegister reg) const { return fpregs_[reg.code()]->d; }
   void write(Register reg, uintptr_t value) const {
     regs_[reg.code()]->r = value;
+  }
+  const Registers::RegisterContent* address(Register reg) const {
+    return regs_[reg.code()];
   }
   const FloatRegisters::RegisterContent* address(FloatRegister reg) const {
     return fpregs_[reg.code()];

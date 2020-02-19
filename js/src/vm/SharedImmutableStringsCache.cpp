@@ -1,5 +1,5 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
- * vim: set ts=8 sts=4 et sw=4 tw=99:
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+ * vim: set ts=8 sts=2 et sw=2 tw=80:
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -20,7 +20,7 @@ SharedImmutableString::SharedImmutableString(
 }
 
 SharedImmutableString::SharedImmutableString(SharedImmutableString&& rhs)
-    : cache_(mozilla::Move(rhs.cache_)), box_(rhs.box_) {
+    : cache_(std::move(rhs.cache_)), box_(rhs.box_) {
   MOZ_ASSERT(this != &rhs, "self move not allowed");
   MOZ_ASSERT(rhs.box_);
   MOZ_ASSERT(rhs.box_->refcount > 0);
@@ -31,13 +31,13 @@ SharedImmutableString::SharedImmutableString(SharedImmutableString&& rhs)
 SharedImmutableString& SharedImmutableString::operator=(
     SharedImmutableString&& rhs) {
   this->~SharedImmutableString();
-  new (this) SharedImmutableString(mozilla::Move(rhs));
+  new (this) SharedImmutableString(std::move(rhs));
   return *this;
 }
 
 SharedImmutableTwoByteString::SharedImmutableTwoByteString(
     SharedImmutableString&& string)
-    : string_(mozilla::Move(string)) {}
+    : string_(std::move(string)) {}
 
 SharedImmutableTwoByteString::SharedImmutableTwoByteString(
     ExclusiveData<SharedImmutableStringsCache::Inner>::Guard& locked,
@@ -48,26 +48,30 @@ SharedImmutableTwoByteString::SharedImmutableTwoByteString(
 
 SharedImmutableTwoByteString::SharedImmutableTwoByteString(
     SharedImmutableTwoByteString&& rhs)
-    : string_(mozilla::Move(rhs.string_)) {
+    : string_(std::move(rhs.string_)) {
   MOZ_ASSERT(this != &rhs, "self move not allowed");
 }
 
 SharedImmutableTwoByteString& SharedImmutableTwoByteString::operator=(
     SharedImmutableTwoByteString&& rhs) {
   this->~SharedImmutableTwoByteString();
-  new (this) SharedImmutableTwoByteString(mozilla::Move(rhs));
+  new (this) SharedImmutableTwoByteString(std::move(rhs));
   return *this;
 }
 
 SharedImmutableString::~SharedImmutableString() {
-  if (!box_) return;
+  if (!box_) {
+    return;
+  }
 
   auto locked = cache_.inner_->lock();
 
   MOZ_ASSERT(box_->refcount > 0);
 
   box_->refcount--;
-  if (box_->refcount == 0) box_->chars_.reset(nullptr);
+  if (box_->refcount == 0) {
+    box_->chars_.reset(nullptr);
+  }
 }
 
 SharedImmutableString SharedImmutableString::clone() const {
@@ -83,10 +87,9 @@ SharedImmutableTwoByteString SharedImmutableTwoByteString::clone() const {
 
 MOZ_MUST_USE mozilla::Maybe<SharedImmutableString>
 SharedImmutableStringsCache::getOrCreate(OwnedChars&& chars, size_t length) {
-  OwnedChars owned(mozilla::Move(chars));
+  OwnedChars owned(std::move(chars));
   MOZ_ASSERT(owned);
-  return getOrCreate(owned.get(), length,
-                     [&]() { return mozilla::Move(owned); });
+  return getOrCreate(owned.get(), length, [&]() { return std::move(owned); });
 }
 
 MOZ_MUST_USE mozilla::Maybe<SharedImmutableString>
@@ -98,10 +101,9 @@ SharedImmutableStringsCache::getOrCreate(const char* chars, size_t length) {
 MOZ_MUST_USE mozilla::Maybe<SharedImmutableTwoByteString>
 SharedImmutableStringsCache::getOrCreate(OwnedTwoByteChars&& chars,
                                          size_t length) {
-  OwnedTwoByteChars owned(mozilla::Move(chars));
+  OwnedTwoByteChars owned(std::move(chars));
   MOZ_ASSERT(owned);
-  return getOrCreate(owned.get(), length,
-                     [&]() { return mozilla::Move(owned); });
+  return getOrCreate(owned.get(), length, [&]() { return std::move(owned); });
 }
 
 MOZ_MUST_USE mozilla::Maybe<SharedImmutableTwoByteString>

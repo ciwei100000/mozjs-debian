@@ -1,8 +1,5 @@
-const options = getJitCompilerOptions();
-
+// |jit-test| skip-if: !getJitCompilerOptions()['baseline.enable']
 // These tests need at least baseline to make sense.
-if (!options['baseline.enable'])
-    quit();
 
 const { assertStackTrace, startProfiling, endProfiling, assertEqPreciseStacks } = WasmHelpers;
 
@@ -10,21 +7,22 @@ enableGeckoProfiling();
 
 let { add } = wasmEvalText(`(module
     (func $add (export "add") (result i32) (param i32) (param i32)
-     get_local 0
+     local.get 0
      i32.const 42
      i32.eq
      if
          unreachable
      end
 
-     get_local 0
-     get_local 1
+     local.get 0
+     local.get 1
      i32.add
     )
 )`).exports;
 
 const SLOW_ENTRY_STACK = ['', '!>', '0,!>', '!>', ''];
 const FAST_ENTRY_STACK = ['', '>', '0,>', '>', ''];
+const INLINED_CALL_STACK = ['', '0', ''];
 
 function main() {
     for (let i = 0; i < 50; i++) {
@@ -37,7 +35,7 @@ function main() {
             assertStackTrace(e, ['wasm-function[0]', 'main', '']);
         }
         let stack = endProfiling();
-        assertEqPreciseStacks(stack, [FAST_ENTRY_STACK, SLOW_ENTRY_STACK]);
+        assertEqPreciseStacks(stack, [INLINED_CALL_STACK, FAST_ENTRY_STACK, SLOW_ENTRY_STACK]);
     }
 }
 

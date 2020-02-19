@@ -1,5 +1,5 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
- * vim: set ts=8 sts=4 et sw=4 tw=99:
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+ * vim: set ts=8 sts=2 et sw=2 tw=80:
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -21,7 +21,9 @@ static bool LoopContainsPossibleCall(MIRGraph& graph, MBasicBlock* header,
     MOZ_ASSERT(i != graph.rpoEnd(),
                "Reached end of graph searching for blocks in loop");
     MBasicBlock* block = *i;
-    if (!block->isMarked()) continue;
+    if (!block->isMarked()) {
+      continue;
+    }
 
     for (auto insIter(block->begin()), insEnd(block->end()); insIter != insEnd;
          ++insIter) {
@@ -35,7 +37,9 @@ static bool LoopContainsPossibleCall(MIRGraph& graph, MBasicBlock* header,
       }
     }
 
-    if (block == backedge) break;
+    if (block == backedge) {
+      break;
+    }
   }
   return false;
 }
@@ -58,8 +62,6 @@ static bool IsInLoop(MDefinition* ins) { return ins->block()->isMarked(); }
 // Test whether the given instruction is cheap and not worth hoisting unless
 // one of its users will be hoisted as well.
 static bool RequiresHoistedUse(const MDefinition* ins, bool hasCalls) {
-  if (ins->isConstantElements()) return true;
-
   if (ins->isBox()) {
     MOZ_ASSERT(!ins->toBox()->input()->isBox(),
                "Box of a box could lead to unbounded recursion");
@@ -69,8 +71,9 @@ static bool RequiresHoistedUse(const MDefinition* ins, bool hasCalls) {
   // Integer constants are usually cheap and aren't worth hoisting on their
   // own, in general. Floating-point constants typically are worth hoisting,
   // unless they'll end up being spilled (eg. due to a call).
-  if (ins->isConstant() && (!IsFloatingPointType(ins->type()) || hasCalls))
+  if (ins->isConstant() && (!IsFloatingPointType(ins->type()) || hasCalls)) {
     return true;
+  }
 
   return false;
 }
@@ -82,13 +85,17 @@ static bool HasOperandInLoop(MInstruction* ins, bool hasCalls) {
   for (size_t i = 0, e = ins->numOperands(); i != e; ++i) {
     MDefinition* op = ins->getOperand(i);
 
-    if (!IsInLoop(op)) continue;
+    if (!IsInLoop(op)) {
+      continue;
+    }
 
     if (RequiresHoistedUse(op, hasCalls)) {
       // Recursively test for loop invariance. Note that the recursion is
       // bounded because we require RequiresHoistedUse to be set at each
       // level.
-      if (!HasOperandInLoop(op->toInstruction(), hasCalls)) continue;
+      if (!HasOperandInLoop(op->toInstruction(), hasCalls)) {
+        continue;
+      }
     }
 
     return true;
@@ -106,7 +113,9 @@ static bool IsHoistableIgnoringDependency(MInstruction* ins, bool hasCalls) {
 // Test whether the given instruction has a memory dependency inside the loop.
 static bool HasDependencyInLoop(MInstruction* ins, MBasicBlock* header) {
   // Don't hoist if this instruction depends on a store inside the loop.
-  if (MDefinition* dep = ins->dependency()) return !IsBeforeLoop(dep, header);
+  if (MDefinition* dep = ins->dependency()) {
+    return !IsBeforeLoop(dep, header);
+  }
   return false;
 }
 
@@ -124,7 +133,9 @@ static void MoveDeferredOperands(MInstruction* ins, MInstruction* hoistPoint,
   // to hoist them.
   for (size_t i = 0, e = ins->numOperands(); i != e; ++i) {
     MDefinition* op = ins->getOperand(i);
-    if (!IsInLoop(op)) continue;
+    if (!IsInLoop(op)) {
+      continue;
+    }
     MOZ_ASSERT(RequiresHoistedUse(op, hasCalls),
                "Deferred loop-invariant operand is not cheap");
     MInstruction* opIns = op->toInstruction();
@@ -202,11 +213,15 @@ static void VisitLoop(MIRGraph& graph, MBasicBlock* header) {
     MOZ_ASSERT(i != graph.rpoEnd(),
                "Reached end of graph searching for blocks in loop");
     MBasicBlock* block = *i;
-    if (!block->isMarked()) continue;
+    if (!block->isMarked()) {
+      continue;
+    }
 
     VisitLoopBlock(block, header, hoistPoint, hasCalls);
 
-    if (block == backedge) break;
+    if (block == backedge) {
+      break;
+    }
   }
 }
 
@@ -217,7 +232,9 @@ bool jit::LICM(MIRGenerator* mir, MIRGraph& graph) {
   // same things either way, but outer first means we do a little less work.
   for (auto i(graph.rpoBegin()), e(graph.rpoEnd()); i != e; ++i) {
     MBasicBlock* header = *i;
-    if (!header->isLoopHeader()) continue;
+    if (!header->isLoopHeader()) {
+      continue;
+    }
 
     bool canOsr;
     size_t numBlocks = MarkLoopBlocks(graph, header, &canOsr);
@@ -231,15 +248,18 @@ bool jit::LICM(MIRGenerator* mir, MIRGraph& graph) {
     // Hoisting out of a loop that has an entry from the OSR block in
     // addition to its normal entry is tricky. In theory we could clone
     // the instruction and insert phis.
-    if (!canOsr)
+    if (!canOsr) {
       VisitLoop(graph, header);
-    else
+    } else {
       JitSpew(JitSpew_LICM, "  Skipping loop with header block%u due to OSR",
               header->id());
+    }
 
     UnmarkLoopBlocks(graph, header);
 
-    if (mir->shouldCancel("LICM (main loop)")) return false;
+    if (mir->shouldCancel("LICM (main loop)")) {
+      return false;
+    }
   }
 
   return true;

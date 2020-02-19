@@ -1,18 +1,17 @@
 //===- FuzzerIO.cpp - IO utils. -------------------------------------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
 // IO functions.
 //===----------------------------------------------------------------------===//
 
-#include "mozilla/Unused.h"
-#include "FuzzerIO.h"
 #include "FuzzerDefs.h"
 #include "FuzzerExtFunctions.h"
+#include "FuzzerIO.h"
+#include "FuzzerUtil.h"
 #include <algorithm>
 #include <cstdarg>
 #include <fstream>
@@ -32,14 +31,16 @@ long GetEpoch(const std::string &Path) {
 }
 
 Unit FileToVector(const std::string &Path, size_t MaxSize, bool ExitOnError) {
-  std::ifstream T(Path);
+  std::ifstream T(Path, std::ios::binary);
   if (ExitOnError && !T) {
     Printf("No such directory: %s; exiting\n", Path.c_str());
     exit(1);
   }
 
   T.seekg(0, T.end);
-  size_t FileLen = T.tellg();
+  auto EndPos = T.tellg();
+  if (EndPos < 0) return {};
+  size_t FileLen = EndPos;
   if (MaxSize)
     FileLen = std::min(FileLen, MaxSize);
 
@@ -50,7 +51,7 @@ Unit FileToVector(const std::string &Path, size_t MaxSize, bool ExitOnError) {
 }
 
 std::string FileToString(const std::string &Path) {
-  std::ifstream T(Path);
+  std::ifstream T(Path, std::ios::binary);
   return std::string((std::istreambuf_iterator<char>(T)),
                      std::istreambuf_iterator<char>());
 }
@@ -63,14 +64,14 @@ void WriteToFile(const Unit &U, const std::string &Path) {
   // Use raw C interface because this function may be called from a sig handler.
   FILE *Out = fopen(Path.c_str(), "w");
   if (!Out) return;
-  mozilla::Unused << fwrite(U.data(), sizeof(U[0]), U.size(), Out);
+  fwrite(U.data(), sizeof(U[0]), U.size(), Out);
   fclose(Out);
 }
 
-void ReadDirToVectorOfUnits(const char *Path, std::vector<Unit> *V,
+void ReadDirToVectorOfUnits(const char *Path, Vector<Unit> *V,
                             long *Epoch, size_t MaxSize, bool ExitOnError) {
   long E = Epoch ? *Epoch : 0;
-  std::vector<std::string> Files;
+  Vector<std::string> Files;
   ListFilesInDirRecursive(Path, Epoch, &Files, /*TopDir*/true);
   size_t NumLoaded = 0;
   for (size_t i = 0; i < Files.size(); i++) {
@@ -83,6 +84,15 @@ void ReadDirToVectorOfUnits(const char *Path, std::vector<Unit> *V,
     if (!S.empty())
       V->push_back(S);
   }
+}
+
+
+void GetSizedFilesFromDir(const std::string &Dir, Vector<SizedFile> *V) {
+  Vector<std::string> Files;
+  ListFilesInDirRecursive(Dir, 0, &Files, /*TopDir*/true);
+  for (auto &File : Files)
+    if (size_t Size = FileSize(File))
+      V->push_back({File, Size});
 }
 
 std::string DirPlusFile(const std::string &DirPath,
@@ -114,6 +124,27 @@ void Printf(const char *Fmt, ...) {
   vfprintf(OutputFile, Fmt, ap);
   va_end(ap);
   fflush(OutputFile);
+}
+
+void VPrintf(bool Verbose, const char *Fmt, ...) {
+  if (!Verbose) return;
+  va_list ap;
+  va_start(ap, Fmt);
+  vfprintf(OutputFile, Fmt, ap);
+  va_end(ap);
+  fflush(OutputFile);
+}
+
+void RmDirRecursive(const std::string &Dir) {
+  IterateDirRecursive(
+      Dir, [](const std::string &Path) {},
+      [](const std::string &Path) { RmDir(Path); },
+      [](const std::string &Path) { RemoveFile(Path); });
+}
+
+std::string TempPath(const char *Extension) {
+  return DirPlusFile(TmpDir(),
+                     "libFuzzerTemp." + std::to_string(GetPid()) + Extension);
 }
 
 }  // namespace fuzzer

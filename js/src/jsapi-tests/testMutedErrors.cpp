@@ -3,6 +3,8 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "jsfriendapi.h"
+#include "js/CompilationAndEvaluation.h"
+#include "js/SourceText.h"
 #include "jsapi-tests/tests.h"
 
 BEGIN_TEST(testMutedErrors) {
@@ -42,21 +44,25 @@ bool eval(const char* asciiChars, bool mutedErrors,
           JS::MutableHandleValue rval) {
   size_t len = strlen(asciiChars);
   mozilla::UniquePtr<char16_t[]> chars(new char16_t[len + 1]);
-  for (size_t i = 0; i < len; ++i) chars[i] = asciiChars[i];
+  for (size_t i = 0; i < len; ++i) {
+    chars[i] = asciiChars[i];
+  }
   chars[len] = 0;
 
-  JS::CompartmentOptions globalOptions;
+  JS::RealmOptions globalOptions;
   JS::RootedObject global(
       cx, JS_NewGlobalObject(cx, getGlobalClass(), nullptr,
                              JS::FireOnNewGlobalHook, globalOptions));
   CHECK(global);
-  JSAutoCompartment ac(cx, global);
-  CHECK(JS_InitStandardClasses(cx, global));
+  JSAutoRealm ar(cx, global);
 
   JS::CompileOptions options(cx);
   options.setMutedErrors(mutedErrors).setFileAndLine("", 0);
 
-  return JS::Evaluate(cx, options, chars.get(), len, rval);
+  JS::SourceText<char16_t> srcBuf;
+  CHECK(srcBuf.init(cx, chars.get(), len, JS::SourceOwnership::Borrowed));
+
+  return JS::Evaluate(cx, options, srcBuf, rval);
 }
 
 bool testOuter(const char* asciiChars) {

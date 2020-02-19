@@ -1,5 +1,5 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
- * vim: set ts=8 sts=4 et sw=4 tw=99:
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+ * vim: set ts=8 sts=2 et sw=2 tw=80:
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -8,7 +8,7 @@
 #define vm_ProxyObject_h
 
 #include "js/Proxy.h"
-#include "vm/ShapedObject.h"
+#include "vm/JSObject.h"
 
 namespace js {
 
@@ -16,10 +16,14 @@ namespace js {
  * This is the base class for the various kinds of proxy objects.  It's never
  * instantiated.
  *
- * Proxy objects use ShapedObject::shape_ primarily to record flags.  Property
+ * Proxy objects use their shape primarily to record flags. Property
  * information, &c. is all dynamically computed.
+ *
+ * There is no class_ member to force specialization of JSObject::is<T>().
+ * The implementation in JSObject is incorrect for proxies since it doesn't
+ * take account of the handler type.
  */
-class ProxyObject : public ShapedObject {
+class ProxyObject : public JSObject {
   // GetProxyDataLayout computes the address of this field.
   detail::ProxyDataLayout data;
 
@@ -58,21 +62,17 @@ class ProxyObject : public ShapedObject {
         &reinterpret_cast<detail::ProxyValueArray*>(inlineDataStart())
              ->reservedSlots;
   }
-  MOZ_MUST_USE bool initExternalValueArrayAfterSwap(
-      JSContext* cx, const Vector<Value>& values);
+  MOZ_MUST_USE bool initExternalValueArrayAfterSwap(JSContext* cx,
+                                                    HandleValueVector values);
 
-  const Value& private_() { return GetProxyPrivate(this); }
+  const Value& private_() const { return GetProxyPrivate(this); }
 
   void setCrossCompartmentPrivate(const Value& priv);
   void setSameCompartmentPrivate(const Value& priv);
 
-  JSObject* target() const {
-    return const_cast<ProxyObject*>(this)->private_().toObjectOrNull();
-  }
+  JSObject* target() const { return private_().toObjectOrNull(); }
 
-  const BaseProxyHandler* handler() const {
-    return GetProxyHandler(const_cast<ProxyObject*>(this));
-  }
+  const BaseProxyHandler* handler() const { return GetProxyHandler(this); }
 
   void setHandler(const BaseProxyHandler* handler) {
     SetProxyHandler(this, handler);
@@ -87,7 +87,7 @@ class ProxyObject : public ShapedObject {
 
   size_t numReservedSlots() const { return JSCLASS_RESERVED_SLOTS(getClass()); }
   const Value& reservedSlot(size_t n) const {
-    return GetProxyReservedSlot(const_cast<ProxyObject*>(this), n);
+    return GetProxyReservedSlot(this, n);
   }
 
   void setReservedSlot(size_t n, const Value& extra) {
@@ -130,11 +130,6 @@ class ProxyObject : public ShapedObject {
   static void traceEdgeToTarget(JSTracer* trc, ProxyObject* obj);
 
   void nuke();
-
-  // There is no class_ member to force specialization of JSObject::is<T>().
-  // The implementation in JSObject is incorrect for proxies since it doesn't
-  // take account of the handler type.
-  static const Class proxyClass;
 };
 
 inline bool IsProxyClass(const Class* clasp) { return clasp->isProxy(); }
@@ -150,7 +145,7 @@ inline bool JSObject::is<js::ProxyObject>() const {
   // functions to ensure the implementations are tied together.
   // Note 2: this specialization isn't used for subclasses of ProxyObject
   // which must supply their own implementation.
-  return js::IsProxy(const_cast<JSObject*>(this));
+  return js::IsProxy(this);
 }
 
 inline bool js::IsDerivedProxyObject(const JSObject* obj,

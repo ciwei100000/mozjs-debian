@@ -1,11 +1,13 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
- * vim: set ts=8 sts=4 et sw=4 tw=99:
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+ * vim: set ts=8 sts=2 et sw=2 tw=80:
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #ifndef vm_TaggedProto_h
 #define vm_TaggedProto_h
+
+#include "mozilla/Maybe.h"
 
 #include "gc/Tracer.h"
 
@@ -49,7 +51,9 @@ class TaggedProto {
   HashNumber hashCode() const;
 
   void trace(JSTracer* trc) {
-    if (isObject()) TraceManuallyBarrieredEdge(trc, &proto, "TaggedProto");
+    if (isObject()) {
+      TraceManuallyBarrieredEdge(trc, &proto, "TaggedProto");
+    }
   }
 
  private:
@@ -69,8 +73,12 @@ struct MovableCellHasher<TaggedProto> {
            MovableCellHasher<JSObject*>::ensureHash(l.toObject());
   }
   static HashNumber hash(const Lookup& l) {
-    if (l.isDynamic()) return uint64_t(1);
-    if (!l.isObject()) return uint64_t(0);
+    if (l.isDynamic()) {
+      return uint64_t(1);
+    }
+    if (!l.isObject()) {
+      return uint64_t(0);
+    }
     return MovableCellHasher<JSObject*>::hash(l.toObject());
   }
   static bool match(const Key& k, const Lookup& l) {
@@ -81,10 +89,10 @@ struct MovableCellHasher<TaggedProto> {
 };
 
 #ifdef DEBUG
-MOZ_ALWAYS_INLINE bool TaggedProtoIsNotGray(const TaggedProto& proto) {
-  if (!proto.isObject()) return true;
-
-  return JS::ObjectIsNotGray(proto.toObject());
+MOZ_ALWAYS_INLINE void AssertTaggedProtoIsNotGray(const TaggedProto& proto) {
+  if (proto.isObject()) {
+    JS::AssertObjectIsNotGray(proto.toObject());
+  }
 }
 #endif
 
@@ -99,8 +107,8 @@ struct InternalBarrierMethods<TaggedProto> {
   static bool isMarkable(const TaggedProto& proto) { return proto.isObject(); }
 
 #ifdef DEBUG
-  static bool thingIsNotGray(const TaggedProto& proto) {
-    return TaggedProtoIsNotGray(proto);
+  static void assertThingIsNotGray(const TaggedProto& proto) {
+    AssertTaggedProtoIsNotGray(proto);
   }
 #endif
 };
@@ -123,14 +131,24 @@ class WrappedPtrOperations<TaggedProto, Wrapper> {
 };
 
 // If the TaggedProto is a JSObject pointer, convert to that type and call |f|
-// with the pointer. If the TaggedProto is lazy, calls F::defaultValue.
-template <typename F, typename... Args>
-auto DispatchTyped(F f, const TaggedProto& proto, Args&&... args)
-    -> decltype(f(static_cast<JSObject*>(nullptr),
-                  mozilla::Forward<Args>(args)...)) {
-  if (proto.isObject())
-    return f(proto.toObject(), mozilla::Forward<Args>(args)...);
-  return F::defaultValue(proto);
+// with the pointer. If the TaggedProto is lazy, returns None().
+template <typename F>
+auto MapGCThingTyped(const TaggedProto& proto, F&& f) {
+  if (proto.isObject()) {
+    return mozilla::Some(f(proto.toObject()));
+  }
+  using ReturnType = decltype(f(static_cast<JSObject*>(nullptr)));
+  return mozilla::Maybe<ReturnType>();
+}
+
+template <typename F>
+bool ApplyGCThingTyped(const TaggedProto& proto, F&& f) {
+  return MapGCThingTyped(proto,
+                         [&f](auto t) {
+                           f(t);
+                           return true;
+                         })
+      .isSome();
 }
 
 // Since JSObject pointers are either nullptr or a valid object and since the

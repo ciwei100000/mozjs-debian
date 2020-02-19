@@ -1,3 +1,4 @@
+// GENERATED, DO NOT EDIT
 // file: byteConversionValues.js
 // Copyright (C) 2016 the V8 project authors. All rights reserved.
 // This code is governed by the BSD license found in the LICENSE file.
@@ -446,7 +447,7 @@ var byteConversionValues = {
 };
 
 // file: detachArrayBuffer.js
-// Copyright (C) 2017 Ecma International.  All rights reserved.
+// Copyright (C) 2016 the V8 project authors.  All rights reserved.
 // This code is governed by the BSD license found in the LICENSE file.
 /*---
 description: |

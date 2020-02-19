@@ -1,5 +1,5 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
- * vim: set ts=8 sts=4 et sw=4 tw=99:
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+ * vim: set ts=8 sts=2 et sw=2 tw=80:
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -13,11 +13,10 @@ namespace js {
 namespace jit {
 
 class LIRGeneratorARM64 : public LIRGeneratorShared {
- public:
+ protected:
   LIRGeneratorARM64(MIRGenerator* gen, MIRGraph& graph, LIRGraph& lirGraph)
       : LIRGeneratorShared(gen, graph, lirGraph) {}
 
- protected:
   // Returns a box allocation. reg2 is ignored on 64-bit platforms.
   LBoxAllocation useBoxFixed(MDefinition* mir, Register reg1, Register reg2,
                              bool useAtStart = false);
@@ -37,7 +36,6 @@ class LIRGeneratorARM64 : public LIRGeneratorShared {
 
   void lowerUntypedPhiInput(MPhi* phi, uint32_t inputPosition, LBlock* block,
                             size_t lirIndex);
-  void defineUntypedPhi(MPhi* phi, size_t lirIndex);
   void lowerInt64PhiInput(MPhi*, uint32_t, LBlock*, size_t) {
     MOZ_CRASH("NYI");
   }
@@ -68,16 +66,6 @@ class LIRGeneratorARM64 : public LIRGeneratorShared {
   void lowerForFPU(LInstructionHelper<1, 2, Temps>* ins, MDefinition* mir,
                    MDefinition* lhs, MDefinition* rhs);
 
-  void lowerForCompIx4(LSimdBinaryCompIx4* ins, MSimdBinaryComp* mir,
-                       MDefinition* lhs, MDefinition* rhs) {
-    return lowerForFPU(ins, mir, lhs, rhs);
-  }
-
-  void lowerForCompFx4(LSimdBinaryCompFx4* ins, MSimdBinaryComp* mir,
-                       MDefinition* lhs, MDefinition* rhs) {
-    return lowerForFPU(ins, mir, lhs, rhs);
-  }
-
   void lowerForBitAndAndBranch(LBitAndAndBranch* baab, MInstruction* mir,
                                MDefinition* lhs, MDefinition* rhs);
   void lowerTruncateDToInt32(MTruncateToInt32* ins);
@@ -89,42 +77,13 @@ class LIRGeneratorARM64 : public LIRGeneratorShared {
   void lowerMulI(MMul* mul, MDefinition* lhs, MDefinition* rhs);
   void lowerUDiv(MDiv* div);
   void lowerUMod(MMod* mod);
-  void visitPowHalf(MPowHalf* ins) override;
-  void visitWasmNeg(MWasmNeg* ins) override;
-  void visitWasmSelect(MWasmSelect* ins) override;
 
   LTableSwitchV* newLTableSwitchV(MTableSwitch* ins);
   LTableSwitch* newLTableSwitch(const LAllocation& in,
                                 const LDefinition& inputCopy,
                                 MTableSwitch* ins);
 
- public:
-  void visitBox(MBox* box) override;
-  void visitUnbox(MUnbox* unbox) override;
-  void visitReturn(MReturn* ret) override;
   void lowerPhi(MPhi* phi);
-  void visitWasmUnsignedToDouble(MWasmUnsignedToDouble* ins) override;
-  void visitWasmUnsignedToFloat32(MWasmUnsignedToFloat32* ins) override;
-  void visitAsmJSLoadHeap(MAsmJSLoadHeap* ins) override;
-  void visitAsmJSStoreHeap(MAsmJSStoreHeap* ins) override;
-  void visitWasmCompareExchangeHeap(MWasmCompareExchangeHeap* ins) override;
-  void visitWasmAtomicExchangeHeap(MWasmAtomicExchangeHeap* ins) override;
-  void visitWasmAtomicBinopHeap(MWasmAtomicBinopHeap* ins) override;
-  void visitCompareExchangeTypedArrayElement(
-      MCompareExchangeTypedArrayElement* ins) override;
-  void visitAtomicExchangeTypedArrayElement(
-      MAtomicExchangeTypedArrayElement* ins) override;
-  void visitAtomicTypedArrayElementBinop(
-      MAtomicTypedArrayElementBinop* ins) override;
-  void visitSubstr(MSubstr* ins) override;
-  void visitRandom(MRandom* ins) override;
-  void visitWasmTruncateToInt64(MWasmTruncateToInt64* ins) override;
-  void visitWasmLoad(MWasmLoad* ins) override;
-  void visitWasmStore(MWasmStore* ins) override;
-  void visitInt64ToFloatingPoint(MInt64ToFloatingPoint* ins) override;
-  void visitCopySign(MCopySign* ins) override;
-  void visitExtendInt32ToInt64(MExtendInt32ToInt64* ins) override;
-  void visitSignExtendInt64(MSignExtendInt64* ins) override;
 };
 
 typedef LIRGeneratorARM64 LIRGeneratorSpecific;

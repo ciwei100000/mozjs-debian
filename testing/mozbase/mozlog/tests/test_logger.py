@@ -15,6 +15,7 @@ import mozunit
 
 import mozfile
 import mozlog.unstructured as mozlog
+import six
 
 
 class ListHandler(mozlog.Handler):
@@ -83,7 +84,7 @@ class TestStructuredLogging(unittest.TestCase):
         The actual message should contain no fields other than the timestamp
         field and those present in expected."""
 
-        self.assertTrue(isinstance(actual['_time'], (int, long)))
+        self.assertTrue(isinstance(actual['_time'], six.integer_types))
 
         for k, v in expected.items():
             self.assertEqual(v, actual[k])
@@ -209,15 +210,15 @@ class TestStructuredLogging(unittest.TestCase):
 
         # Sleeps prevent listener from receiving entire message in a single call
         # to recv in order to test reconstruction of partial messages.
-        sock.sendall(message_string[:8])
+        sock.sendall(message_string[:8].encode())
         time.sleep(.01)
-        sock.sendall(message_string[8:32])
+        sock.sendall(message_string[8:32].encode())
         time.sleep(.01)
-        sock.sendall(message_string[32:64])
+        sock.sendall(message_string[32:64].encode())
         time.sleep(.01)
-        sock.sendall(message_string[64:128])
+        sock.sendall(message_string[64:128].encode())
         time.sleep(.01)
-        sock.sendall(message_string[128:])
+        sock.sendall(message_string[128:].encode())
 
         server_thread.join()
 

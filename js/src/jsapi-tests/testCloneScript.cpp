@@ -1,5 +1,5 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
- * vim: set ts=8 sts=4 et sw=4 tw=99:
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+ * vim: set ts=8 sts=2 et sw=2 tw=80:
  *
  * Test script cloning.
  */
@@ -7,7 +7,19 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+#include "mozilla/Utf8.h"  // mozilla::Utf8Unit
+
+#include <string.h>  // strlen
+
+#include "jsapi.h"  // sundry symbols not moved to more-specific headers yet
 #include "jsfriendapi.h"
+#include "jspubtd.h"  // JS::RootedObjectVector
+
+#include "js/CompilationAndEvaluation.h"  // JS::CompileFunction
+#include "js/CompileOptions.h"            // JS::CompileOptions
+#include "js/RootingAPI.h"                // JS::Rooted
+#include "js/SourceText.h"                // JS::Source{Ownership,Text}
+#include "js/TypeDecls.h"                 // JSFunction, JSObject
 #include "jsapi-tests/tests.h"
 
 BEGIN_TEST(test_cloneScript) {
@@ -17,7 +29,7 @@ BEGIN_TEST(test_cloneScript) {
   CHECK(A);
   CHECK(B);
 
-  const char* source =
+  static const char source[] =
       "var i = 0;\n"
       "var sum = 0;\n"
       "while (i < 10) {\n"
@@ -30,19 +42,26 @@ BEGIN_TEST(test_cloneScript) {
 
   // compile for A
   {
-    JSAutoCompartment a(cx, A);
-    JS::RootedFunction fun(cx);
+    JSAutoRealm a(cx, A);
+
+    JS::SourceText<mozilla::Utf8Unit> srcBuf;
+    CHECK(srcBuf.init(cx, source, mozilla::ArrayLength(source) - 1,
+                      JS::SourceOwnership::Borrowed));
+
     JS::CompileOptions options(cx);
     options.setFileAndLine(__FILE__, 1);
-    JS::AutoObjectVector emptyScopeChain(cx);
-    CHECK(JS::CompileFunction(cx, emptyScopeChain, options, "f", 0, nullptr,
-                              source, strlen(source), &fun));
+
+    JS::RootedFunction fun(cx);
+    JS::RootedObjectVector emptyScopeChain(cx);
+    fun = JS::CompileFunction(cx, emptyScopeChain, options, "f", 0, nullptr,
+                              srcBuf);
+    CHECK(fun);
     CHECK(obj = JS_GetFunctionObject(fun));
   }
 
   // clone into B
   {
-    JSAutoCompartment b(cx, B);
+    JSAutoRealm b(cx, B);
     CHECK(JS::CloneFunctionObject(cx, obj));
   }
 
@@ -93,20 +112,25 @@ BEGIN_TEST(test_cloneScriptWithPrincipals) {
   CHECK(B);
 
   const char* argnames[] = {"arg"};
-  const char* source = "return function() { return arg; }";
+  static const char source[] = "return function() { return arg; }";
 
   JS::RootedObject obj(cx);
 
   // Compile in A
   {
-    JSAutoCompartment a(cx, A);
+    JSAutoRealm a(cx, A);
+
+    JS::SourceText<mozilla::Utf8Unit> srcBuf;
+    CHECK(srcBuf.init(cx, source, mozilla::ArrayLength(source) - 1,
+                      JS::SourceOwnership::Borrowed));
+
     JS::CompileOptions options(cx);
     options.setFileAndLine(__FILE__, 1);
+
     JS::RootedFunction fun(cx);
-    JS::AutoObjectVector emptyScopeChain(cx);
-    JS::CompileFunction(cx, emptyScopeChain, options, "f",
-                        mozilla::ArrayLength(argnames), argnames, source,
-                        strlen(source), &fun);
+    JS::RootedObjectVector emptyScopeChain(cx);
+    fun = JS::CompileFunction(cx, emptyScopeChain, options, "f",
+                              mozilla::ArrayLength(argnames), argnames, srcBuf);
     CHECK(fun);
 
     JSScript* script;
@@ -118,7 +142,7 @@ BEGIN_TEST(test_cloneScriptWithPrincipals) {
 
   // Clone into B
   {
-    JSAutoCompartment b(cx, B);
+    JSAutoRealm b(cx, B);
     JS::RootedObject cloned(cx);
     CHECK(cloned = JS::CloneFunctionObject(cx, obj));
 
@@ -138,7 +162,7 @@ BEGIN_TEST(test_cloneScriptWithPrincipals) {
     CHECK(v.isObject());
 
     JSObject* funobj = &v.toObject();
-    CHECK(JS_ObjectIsFunction(cx, funobj));
+    CHECK(JS_ObjectIsFunction(funobj));
     CHECK(fun = JS_ValueToFunction(cx, v));
     CHECK(script = JS_GetFunctionScript(cx, fun));
     CHECK(JS_GetScriptPrincipals(script) == principalsB);

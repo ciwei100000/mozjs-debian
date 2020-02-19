@@ -1,5 +1,5 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
- * vim: set ts=8 sts=4 et sw=4 tw=99:
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+ * vim: set ts=8 sts=2 et sw=2 tw=80:
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -17,48 +17,53 @@
 #include "gc/Tracer.h"
 #include "js/AllocPolicy.h"
 #include "js/GCHashTable.h"
+#include "js/HeapAPI.h"
 #include "js/RootingAPI.h"
+#include "js/Symbol.h"
 #include "js/TypeDecls.h"
 #include "js/Utility.h"
 #include "vm/Printer.h"
 #include "vm/StringType.h"
 
 namespace js {
-class AutoLockForExclusiveAccess;
+class AutoAccessAtomsZone;
 }  // namespace js
 
 namespace JS {
 
 class Symbol : public js::gc::TenuredCell {
  private:
+  // User description of symbol. Also meets gc::Cell requirements.
+  JSAtom* description_;
+
   SymbolCode code_;
 
   // Each Symbol gets its own hash code so that we don't have to use
   // addresses as hash codes (a security hazard).
   js::HashNumber hash_;
 
-  JSAtom* description_;
-
-  // The minimum allocation size is sizeof(JSString): 16 bytes on 32-bit
-  // architectures and 24 bytes on 64-bit.  A size_t of padding makes Symbol
-  // the minimum size on both.
-  size_t unused_;
-
   Symbol(SymbolCode code, js::HashNumber hash, JSAtom* desc)
-      : code_(code), hash_(hash), description_(desc) {
-    // Silence warnings about unused_ being... unused.
-    (void)unused_;
-  }
+      : description_(desc), code_(code), hash_(hash) {}
 
   Symbol(const Symbol&) = delete;
   void operator=(const Symbol&) = delete;
 
   static Symbol* newInternal(JSContext* cx, SymbolCode code,
-                             js::HashNumber hash, JSAtom* description,
-                             js::AutoLockForExclusiveAccess& lock);
+                             js::HashNumber hash, js::HandleAtom description);
+
+  static void staticAsserts() {
+    static_assert(uint32_t(SymbolCode::WellKnownAPILimit) ==
+                      JS::shadow::Symbol::WellKnownAPILimit,
+                  "JS::shadow::Symbol::WellKnownAPILimit must match "
+                  "SymbolCode::WellKnownAPILimit");
+    static_assert(
+        offsetof(Symbol, code_) == offsetof(JS::shadow::Symbol, code_),
+        "JS::shadow::Symbol::code_ offset must match SymbolCode::code_");
+  }
 
  public:
-  static Symbol* new_(JSContext* cx, SymbolCode code, JSString* description);
+  static Symbol* new_(JSContext* cx, SymbolCode code,
+                      js::HandleString description);
   static Symbol* for_(JSContext* cx, js::HandleString description);
 
   JSAtom* description() const { return description_; }
@@ -80,21 +85,23 @@ class Symbol : public js::gc::TenuredCell {
 
   static const JS::TraceKind TraceKind = JS::TraceKind::Symbol;
   inline void traceChildren(JSTracer* trc) {
-    if (description_)
+    if (description_) {
       js::TraceManuallyBarrieredEdge(trc, &description_, "description");
+    }
   }
   inline void finalize(js::FreeOp*) {}
 
   static MOZ_ALWAYS_INLINE void writeBarrierPre(Symbol* thing) {
-    if (thing && !thing->isWellKnownSymbol())
+    if (thing && !thing->isWellKnownSymbol()) {
       thing->asTenured().writeBarrierPre(thing);
+    }
   }
 
   size_t sizeOfIncludingThis(mozilla::MallocSizeOf mallocSizeOf) const {
     return mallocSizeOf(this);
   }
 
-#ifdef DEBUG
+#if defined(DEBUG) || defined(JS_JITSPEW)
   void dump();  // Debugger-friendly stderr dump.
   void dump(js::GenericPrinter& out);
 #endif
@@ -114,6 +121,8 @@ struct HashSymbolsByDescription {
 };
 
 /*
+ * [SMDOC] Symbol.for() registry (ES6 GlobalSymbolRegistry)
+ *
  * The runtime-wide symbol registry, used to implement Symbol.for().
  *
  * ES6 draft rev 25 (2014 May 22) calls this the GlobalSymbolRegistry List. In
@@ -129,7 +138,7 @@ struct HashSymbolsByDescription {
  * enumerating the symbol registry, querying its size, etc.
  */
 class SymbolRegistry
-    : public GCHashSet<ReadBarrieredSymbol, HashSymbolsByDescription,
+    : public GCHashSet<WeakHeapPtrSymbol, HashSymbolsByDescription,
                        SystemAllocPolicy> {
  public:
   SymbolRegistry() {}

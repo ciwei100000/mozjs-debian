@@ -1,5 +1,5 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
- * vim: set ts=8 sts=4 et sw=4 tw=99:
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+ * vim: set ts=8 sts=2 et sw=2 tw=80:
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -28,6 +28,10 @@ void MacroAssembler::move8SignExtend(Register src, Register dest) {
 
 void MacroAssembler::move16SignExtend(Register src, Register dest) {
   ma_seh(dest, src);
+}
+
+void MacroAssembler::loadAbiReturnAddress(Register dest) {
+  movePtr(ra, dest);
 }
 
 // ===============================================================
@@ -155,19 +159,21 @@ void MacroAssembler::mulDoublePtr(ImmPtr imm, Register temp,
 
 void MacroAssembler::quotient32(Register rhs, Register srcDest,
                                 bool isUnsigned) {
-  if (isUnsigned)
+  if (isUnsigned) {
     as_divu(srcDest, rhs);
-  else
+  } else {
     as_div(srcDest, rhs);
+  }
   as_mflo(srcDest);
 }
 
 void MacroAssembler::remainder32(Register rhs, Register srcDest,
                                  bool isUnsigned) {
-  if (isUnsigned)
+  if (isUnsigned) {
     as_divu(srcDest, rhs);
-  else
+  } else {
     as_div(srcDest, rhs);
+  }
   as_mfhi(srcDest);
 }
 
@@ -228,12 +234,20 @@ void MacroAssembler::lshift32(Register src, Register dest) {
   ma_sll(dest, dest, src);
 }
 
+void MacroAssembler::flexibleLshift32(Register src, Register dest) {
+  lshift32(src, dest);
+}
+
 void MacroAssembler::lshift32(Imm32 imm, Register dest) {
   ma_sll(dest, dest, imm);
 }
 
 void MacroAssembler::rshift32(Register src, Register dest) {
   ma_srl(dest, dest, src);
+}
+
+void MacroAssembler::flexibleRshift32(Register src, Register dest) {
+  rshift32(src, dest);
 }
 
 void MacroAssembler::rshift32(Imm32 imm, Register dest) {
@@ -244,6 +258,10 @@ void MacroAssembler::rshift32Arithmetic(Register src, Register dest) {
   ma_sra(dest, dest, src);
 }
 
+void MacroAssembler::flexibleRshift32Arithmetic(Register src, Register dest) {
+  rshift32Arithmetic(src, dest);
+}
+
 void MacroAssembler::rshift32Arithmetic(Imm32 imm, Register dest) {
   ma_sra(dest, dest, imm);
 }
@@ -251,19 +269,21 @@ void MacroAssembler::rshift32Arithmetic(Imm32 imm, Register dest) {
 // ===============================================================
 // Rotation functions
 void MacroAssembler::rotateLeft(Imm32 count, Register input, Register dest) {
-  if (count.value)
+  if (count.value) {
     ma_rol(dest, input, count);
-  else
+  } else {
     ma_move(dest, input);
+  }
 }
 void MacroAssembler::rotateLeft(Register count, Register input, Register dest) {
   ma_rol(dest, input, count);
 }
 void MacroAssembler::rotateRight(Imm32 count, Register input, Register dest) {
-  if (count.value)
+  if (count.value) {
     ma_ror(dest, input, count);
-  else
+  } else {
     ma_move(dest, input);
+  }
 }
 void MacroAssembler::rotateRight(Register count, Register input,
                                  Register dest) {
@@ -427,30 +447,6 @@ void MacroAssembler::branchPtr(Condition cond, const BaseIndex& lhs,
   branchPtr(cond, SecondScratchReg, rhs, label);
 }
 
-template <typename T>
-CodeOffsetJump MacroAssembler::branchPtrWithPatch(Condition cond, Register lhs,
-                                                  T rhs, RepatchLabel* label) {
-  movePtr(rhs, ScratchRegister);
-  Label skipJump;
-  ma_b(lhs, ScratchRegister, &skipJump, InvertCondition(cond), ShortJump);
-  CodeOffsetJump off = jumpWithPatch(label);
-  bind(&skipJump);
-  return off;
-}
-
-template <typename T>
-CodeOffsetJump MacroAssembler::branchPtrWithPatch(Condition cond, Address lhs,
-                                                  T rhs, RepatchLabel* label) {
-  loadPtr(lhs, SecondScratchReg);
-  movePtr(rhs, ScratchRegister);
-  Label skipJump;
-  ma_b(SecondScratchReg, ScratchRegister, &skipJump, InvertCondition(cond),
-       ShortJump);
-  CodeOffsetJump off = jumpWithPatch(label);
-  bind(&skipJump);
-  return off;
-}
-
 void MacroAssembler::branchFloat(DoubleCondition cond, FloatRegister lhs,
                                  FloatRegister rhs, Label* label) {
   ma_bc1s(lhs, rhs, label, cond);
@@ -471,15 +467,16 @@ void MacroAssembler::branchTruncateDoubleToInt32(FloatRegister src,
   MOZ_CRASH();
 }
 
-template <typename T, typename L>
+template <typename T>
 void MacroAssembler::branchAdd32(Condition cond, T src, Register dest,
-                                 L overflow) {
+                                 Label* overflow) {
   switch (cond) {
     case Overflow:
       ma_addTestOverflow(dest, dest, src, overflow);
       break;
+    case CarryClear:
     case CarrySet:
-      ma_addTestCarry(dest, dest, src, overflow);
+      ma_addTestCarry(cond, dest, dest, src, overflow);
       break;
     default:
       MOZ_CRASH("NYI");
@@ -501,6 +498,13 @@ void MacroAssembler::branchSub32(Condition cond, T src, Register dest,
     default:
       MOZ_CRASH("NYI");
   }
+}
+
+template <typename T>
+void MacroAssembler::branchMul32(Condition cond, T src, Register dest,
+                                 Label* overflow) {
+  MOZ_ASSERT(cond == Assembler::Overflow);
+  ma_mul_branch_overflow(dest, dest, src, overflow);
 }
 
 void MacroAssembler::decBranchPtr(Condition cond, Register lhs, Imm32 rhs,
@@ -783,18 +787,40 @@ void MacroAssembler::branchToComputedAddress(const BaseIndex& addr) {
 
 void MacroAssembler::cmp32Move32(Condition cond, Register lhs, Register rhs,
                                  Register src, Register dest) {
-  MOZ_CRASH();
+  Register scratch = ScratchRegister;
+  MOZ_ASSERT(src != scratch && dest != scratch);
+  cmp32Set(cond, lhs, rhs, scratch);
+  as_movn(dest, src, scratch);
 }
 
 void MacroAssembler::cmp32MovePtr(Condition cond, Register lhs, Imm32 rhs,
                                   Register src, Register dest) {
-  MOZ_CRASH();
+  Register scratch = ScratchRegister;
+  MOZ_ASSERT(src != scratch && dest != scratch);
+  cmp32Set(cond, lhs, rhs, scratch);
+  as_movn(dest, src, scratch);
 }
 
 void MacroAssembler::cmp32Move32(Condition cond, Register lhs,
                                  const Address& rhs, Register src,
                                  Register dest) {
-  MOZ_CRASH();
+  SecondScratchRegisterScope scratch2(*this);
+  MOZ_ASSERT(lhs != scratch2 && src != scratch2 && dest != scratch2);
+  load32(rhs, scratch2);
+  cmp32Move32(cond, lhs, scratch2, src, dest);
+}
+
+void MacroAssembler::cmp32Load32(Condition cond, Register lhs,
+                                 const Address& rhs, const Address& src,
+                                 Register dest) {
+  // This is never used, but must be present to facilitate linking on mips(64).
+  MOZ_CRASH("No known use cases");
+}
+
+void MacroAssembler::cmp32Load32(Condition cond, Register lhs, Register rhs,
+                                 const Address& src, Register dest) {
+  // This is never used, but must be present to facilitate linking on mips(64).
+  MOZ_CRASH("No known use cases");
 }
 
 void MacroAssembler::test32LoadPtr(Condition cond, const Address& addr,
@@ -863,7 +889,11 @@ void MacroAssembler::storeUncanonicalizedFloat32(FloatRegister src,
   ma_ss(src, addr);
 }
 
-void MacroAssembler::memoryBarrier(MemoryBarrierBits barrier) { as_sync(); }
+void MacroAssembler::memoryBarrier(MemoryBarrierBits barrier) {
+  if (barrier) {
+    as_sync();
+  }
+}
 
 // ===============================================================
 // Clamping functions.

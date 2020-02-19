@@ -1,5 +1,5 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
- * vim: set ts=8 sts=4 et sw=4 tw=99:
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+ * vim: set ts=8 sts=2 et sw=2 tw=80:
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -45,6 +45,7 @@ ABIArg ABIArgGenerator::next(MIRType type) {
     case MIRType::Int32:
     case MIRType::Int64:
     case MIRType::Pointer:
+    case MIRType::RefOrNull:
       current_ = ABIArg(IntArgRegs[regIndex_++]);
       break;
     case MIRType::Float32:
@@ -74,6 +75,7 @@ ABIArg ABIArgGenerator::next(MIRType type) {
     case MIRType::Int32:
     case MIRType::Int64:
     case MIRType::Pointer:
+    case MIRType::RefOrNull:
       if (intRegIndex_ == NumIntArgRegs) {
         current_ = ABIArg(stackOffset_);
         stackOffset_ += sizeof(uint64_t);
@@ -88,10 +90,11 @@ ABIArg ABIArgGenerator::next(MIRType type) {
         stackOffset_ += sizeof(uint64_t);
         break;
       }
-      if (type == MIRType::Float32)
+      if (type == MIRType::Float32) {
         current_ = ABIArg(FloatArgRegs[floatRegIndex_++].asSingle());
-      else
+      } else {
         current_ = ABIArg(FloatArgRegs[floatRegIndex_++]);
+      }
       break;
     case MIRType::Int8x16:
     case MIRType::Int16x8:
@@ -115,7 +118,7 @@ ABIArg ABIArgGenerator::next(MIRType type) {
 #endif
 }
 
-void Assembler::writeRelocation(JmpSrc src, Relocation::Kind reloc) {
+void Assembler::writeRelocation(JmpSrc src, RelocationKind reloc) {
   if (!jumpRelocations_.length()) {
     // The jump relocation table starts with a fixed-width integer pointing
     // to the start of the extended jump table. But, we don't know the
@@ -123,24 +126,26 @@ void Assembler::writeRelocation(JmpSrc src, Relocation::Kind reloc) {
     // patch later.
     jumpRelocations_.writeFixedUint32_t(0);
   }
-  if (reloc == Relocation::JITCODE) {
+  if (reloc == RelocationKind::JITCODE) {
     jumpRelocations_.writeUnsigned(src.offset());
     jumpRelocations_.writeUnsigned(jumps_.length());
   }
 }
 
 void Assembler::addPendingJump(JmpSrc src, ImmPtr target,
-                               Relocation::Kind reloc) {
+                               RelocationKind reloc) {
   MOZ_ASSERT(target.value != nullptr);
 
   // Emit reloc before modifying the jump table, since it computes a 0-based
   // index. This jump is not patchable at runtime.
-  if (reloc == Relocation::JITCODE) writeRelocation(src, reloc);
+  if (reloc == RelocationKind::JITCODE) {
+    writeRelocation(src, reloc);
+  }
   enoughMemory_ &=
       jumps_.append(RelativePatch(src.offset(), target.value, reloc));
 }
 
-size_t Assembler::addPatchableJump(JmpSrc src, Relocation::Kind reloc) {
+size_t Assembler::addPatchableJump(JmpSrc src, RelocationKind reloc) {
   // This jump is patchable at runtime so we always need to make sure the
   // jump table is emitted.
   writeRelocation(src, reloc);
@@ -162,15 +167,15 @@ uint8_t* Assembler::PatchableJumpAddress(JitCode* code, size_t index) {
 }
 
 /* static */
-void Assembler::PatchJumpEntry(uint8_t* entry, uint8_t* target,
-                               ReprotectCode reprotect) {
+void Assembler::PatchJumpEntry(uint8_t* entry, uint8_t* target) {
   uint8_t** index = (uint8_t**)(entry + SizeOfExtendedJump - sizeof(void*));
-  MaybeAutoWritableJitCode awjc(index, sizeof(void*), reprotect);
   *index = target;
 }
 
 void Assembler::finish() {
-  if (oom()) return;
+  if (oom()) {
+    return;
+  }
 
   if (!jumps_.length()) {
     // Since we may be folowed by non-executable data, eagerly insert an
@@ -189,8 +194,9 @@ void Assembler::finish() {
   // tracked for GC.
   MOZ_ASSERT_IF(jumpRelocations_.length(),
                 jumpRelocations_.length() >= sizeof(uint32_t));
-  if (jumpRelocations_.length())
+  if (jumpRelocations_.length()) {
     *(uint32_t*)jumpRelocations_.buffer() = extendedJumpTable_;
+  }
 
   // Zero the extended jumps table.
   for (size_t i = 0; i < jumps_.length(); i++) {
@@ -248,12 +254,15 @@ class RelocationIterator {
   uint32_t extOffset_;
 
  public:
-  explicit RelocationIterator(CompactBufferReader& reader) : reader_(reader) {
+  explicit RelocationIterator(CompactBufferReader& reader)
+      : reader_(reader), offset_(0), extOffset_(0) {
     tableStart_ = reader_.readFixedUint32_t();
   }
 
   bool read() {
-    if (!reader_.more()) return false;
+    if (!reader_.more()) {
+      return false;
+    }
     offset_ = reader_.readUnsigned();
     extOffset_ = reader_.readUnsigned();
     return true;

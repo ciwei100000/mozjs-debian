@@ -1,13 +1,13 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
- * vim: set ts=8 sts=4 et sw=4 tw=99:
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+ * vim: set ts=8 sts=2 et sw=2 tw=80:
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "jit/mips32/Lowering-mips32.h"
 
+#include "jit/Lowering.h"
 #include "jit/mips32/Assembler-mips32.h"
-
 #include "jit/MIR.h"
 
 #include "jit/shared/Lowering-shared-inl.h"
@@ -25,7 +25,7 @@ LBoxAllocation LIRGeneratorMIPS::useBoxFixed(MDefinition* mir, Register reg1,
                         LUse(reg2, VirtualRegisterOfPayload(mir), useAtStart));
 }
 
-void LIRGeneratorMIPS::visitBox(MBox* box) {
+void LIRGenerator::visitBox(MBox* box) {
   MDefinition* inner = box->getOperand(0);
 
   // If the box wrapped a double, it needs a new register.
@@ -64,13 +64,15 @@ void LIRGeneratorMIPS::visitBox(MBox* box) {
   add(lir);
 }
 
-void LIRGeneratorMIPS::visitUnbox(MUnbox* unbox) {
+void LIRGenerator::visitUnbox(MUnbox* unbox) {
   MDefinition* inner = unbox->getOperand(0);
 
   if (inner->type() == MIRType::ObjectOrNull) {
     LUnboxObjectOrNull* lir =
         new (alloc()) LUnboxObjectOrNull(useRegisterAtStart(inner));
-    if (unbox->fallible()) assignSnapshot(lir, unbox->bailoutKind());
+    if (unbox->fallible()) {
+      assignSnapshot(lir, unbox->bailoutKind());
+    }
     defineReuseInput(lir, unbox, 0);
     return;
   }
@@ -85,7 +87,9 @@ void LIRGeneratorMIPS::visitUnbox(MUnbox* unbox) {
   if (IsFloatingPointType(unbox->type())) {
     LUnboxFloatingPoint* lir =
         new (alloc()) LUnboxFloatingPoint(useBox(inner), unbox->type());
-    if (unbox->fallible()) assignSnapshot(lir, unbox->bailoutKind());
+    if (unbox->fallible()) {
+      assignSnapshot(lir, unbox->bailoutKind());
+    }
     define(lir, unbox);
     return;
   }
@@ -96,7 +100,9 @@ void LIRGeneratorMIPS::visitUnbox(MUnbox* unbox) {
   lir->setOperand(0, usePayloadInRegisterAtStart(inner));
   lir->setOperand(1, useType(inner, LUse::REGISTER));
 
-  if (unbox->fallible()) assignSnapshot(lir, unbox->bailoutKind());
+  if (unbox->fallible()) {
+    assignSnapshot(lir, unbox->bailoutKind());
+  }
 
   // Types and payloads form two separate intervals. If the type becomes dead
   // before the payload, it could be used as a Value without the type being
@@ -106,7 +112,7 @@ void LIRGeneratorMIPS::visitUnbox(MUnbox* unbox) {
   defineReuseInput(lir, unbox, 0);
 }
 
-void LIRGeneratorMIPS::visitReturn(MReturn* ret) {
+void LIRGenerator::visitReturn(MReturn* ret) {
   MDefinition* opd = ret->getOperand(0);
   MOZ_ASSERT(opd->type() == MIRType::Value);
 
@@ -115,22 +121,6 @@ void LIRGeneratorMIPS::visitReturn(MReturn* ret) {
   ins->setOperand(1, LUse(JSReturnReg_Data));
   fillBoxUses(ins, 0, opd);
   add(ins);
-}
-
-void LIRGeneratorMIPS::defineUntypedPhi(MPhi* phi, size_t lirIndex) {
-  LPhi* type = current->getPhi(lirIndex + VREG_TYPE_OFFSET);
-  LPhi* payload = current->getPhi(lirIndex + VREG_DATA_OFFSET);
-
-  uint32_t typeVreg = getVirtualRegister();
-  phi->setVirtualRegister(typeVreg);
-
-  uint32_t payloadVreg = getVirtualRegister();
-  MOZ_ASSERT(typeVreg + 1 == payloadVreg);
-
-  type->setDef(0, LDefinition(typeVreg, LDefinition::TYPE));
-  payload->setDef(0, LDefinition(payloadVreg, LDefinition::PAYLOAD));
-  annotate(type);
-  annotate(payload);
 }
 
 void LIRGeneratorMIPS::lowerUntypedPhiInput(MPhi* phi, uint32_t inputPosition,
@@ -228,12 +218,12 @@ void LIRGeneratorMIPS::lowerUModI64(MMod* mod) {
   defineReturn(lir, mod);
 }
 
-void LIRGeneratorMIPS::visitRandom(MRandom* ins) {
+void LIRGenerator::visitRandom(MRandom* ins) {
   LRandom* lir = new (alloc()) LRandom(temp(), temp(), temp(), temp(), temp());
   defineFixed(lir, ins, LFloatReg(ReturnDoubleReg));
 }
 
-void LIRGeneratorMIPS::visitWasmTruncateToInt64(MWasmTruncateToInt64* ins) {
+void LIRGenerator::visitWasmTruncateToInt64(MWasmTruncateToInt64* ins) {
   MDefinition* opd = ins->input();
   MOZ_ASSERT(opd->type() == MIRType::Double || opd->type() == MIRType::Float32);
 
@@ -241,7 +231,7 @@ void LIRGeneratorMIPS::visitWasmTruncateToInt64(MWasmTruncateToInt64* ins) {
                ins);
 }
 
-void LIRGeneratorMIPS::visitInt64ToFloatingPoint(MInt64ToFloatingPoint* ins) {
+void LIRGenerator::visitInt64ToFloatingPoint(MInt64ToFloatingPoint* ins) {
   MDefinition* opd = ins->input();
   MOZ_ASSERT(opd->type() == MIRType::Int64);
   MOZ_ASSERT(IsFloatingPointType(ins->type()));

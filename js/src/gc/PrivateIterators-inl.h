@@ -1,5 +1,5 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
- * vim: set ts=8 sts=4 et sw=4 tw=99:
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+ * vim: set ts=8 sts=2 et sw=2 tw=80:
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -18,37 +18,31 @@
 namespace js {
 namespace gc {
 
-class ArenaCellIterUnderGC : public ArenaCellIterImpl {
+class ArenaCellIterUnderGC : public ArenaCellIter {
  public:
   explicit ArenaCellIterUnderGC(Arena* arena)
-      : ArenaCellIterImpl(arena, CellIterDoesntNeedBarrier) {
+      : ArenaCellIter(arena) {
     MOZ_ASSERT(CurrentThreadIsPerformingGC());
   }
 };
 
-class ArenaCellIterUnderFinalize : public ArenaCellIterImpl {
+class ArenaCellIterUnderFinalize : public ArenaCellIter {
  public:
   explicit ArenaCellIterUnderFinalize(Arena* arena)
-      : ArenaCellIterImpl(arena, CellIterDoesntNeedBarrier) {
+      : ArenaCellIter(arena) {
     MOZ_ASSERT(CurrentThreadIsGCSweeping());
   }
 };
 
-class ArenaCellIterUnbarriered : public ArenaCellIterImpl {
- public:
-  explicit ArenaCellIterUnbarriered(Arena* arena)
-      : ArenaCellIterImpl(arena, CellIterDoesntNeedBarrier) {}
-};
-
-class GrayObjectIter : public ZoneCellIter<js::gc::TenuredCell> {
+class GrayObjectIter : public ZoneAllCellIter<js::gc::TenuredCell> {
  public:
   explicit GrayObjectIter(JS::Zone* zone, AllocKind kind)
-      : ZoneCellIter<js::gc::TenuredCell>() {
+      : ZoneAllCellIter<js::gc::TenuredCell>() {
     initForTenuredIteration(zone, kind);
   }
 
   JSObject* get() const {
-    return ZoneCellIter<js::gc::TenuredCell>::get<JSObject>();
+    return ZoneAllCellIter<js::gc::TenuredCell>::get<JSObject>();
   }
   operator JSObject*() const { return get(); }
   JSObject* operator->() const { return get(); }
@@ -60,11 +54,13 @@ class GCZonesIter {
  public:
   explicit GCZonesIter(JSRuntime* rt, ZoneSelector selector = WithAtoms)
       : zone(rt, selector) {
-    MOZ_ASSERT(JS::CurrentThreadIsHeapBusy());
+    MOZ_ASSERT(JS::RuntimeHeapIsBusy());
     MOZ_ASSERT_IF(rt->gc.atomsZone->isCollectingFromAnyThread(),
                   !rt->hasHelperThreadZones());
 
-    if (!zone->isCollectingFromAnyThread()) next();
+    if (!done() && !zone->isCollectingFromAnyThread()) {
+      next();
+    }
   }
 
   bool done() const { return zone.done(); }
@@ -85,16 +81,28 @@ class GCZonesIter {
   JS::Zone* operator->() const { return get(); }
 };
 
-typedef CompartmentsIterT<GCZonesIter> GCCompartmentsIter;
+using GCCompartmentsIter =
+    CompartmentsOrRealmsIterT<GCZonesIter, CompartmentsInZoneIter>;
+using GCRealmsIter = CompartmentsOrRealmsIterT<GCZonesIter, RealmsInZoneIter>;
 
 /* Iterates over all zones in the current sweep group. */
 class SweepGroupZonesIter {
   JS::Zone* current;
+  ZoneSelector selector;
 
  public:
-  explicit SweepGroupZonesIter(JSRuntime* rt) {
+  explicit SweepGroupZonesIter(JSRuntime* rt, ZoneSelector selector = WithAtoms)
+      : selector(selector) {
     MOZ_ASSERT(CurrentThreadIsPerformingGC());
     current = rt->gc.getCurrentSweepGroup();
+    maybeSkipAtomsZone();
+  }
+
+  void maybeSkipAtomsZone() {
+    if (selector == SkipAtoms && current && current->isAtomsZone()) {
+      current = current->nextNodeInGroup();
+      MOZ_ASSERT_IF(current, !current->isAtomsZone());
+    }
   }
 
   bool done() const { return !current; }
@@ -102,6 +110,7 @@ class SweepGroupZonesIter {
   void next() {
     MOZ_ASSERT(!done());
     current = current->nextNodeInGroup();
+    maybeSkipAtomsZone();
   }
 
   JS::Zone* get() const {
@@ -113,9 +122,12 @@ class SweepGroupZonesIter {
   JS::Zone* operator->() const { return get(); }
 };
 
-typedef CompartmentsIterT<SweepGroupZonesIter> SweepGroupCompartmentsIter;
+using SweepGroupCompartmentsIter =
+    CompartmentsOrRealmsIterT<SweepGroupZonesIter, CompartmentsInZoneIter>;
+using SweepGroupRealmsIter =
+    CompartmentsOrRealmsIterT<SweepGroupZonesIter, RealmsInZoneIter>;
 
-// Iterate the free cells in an arena. See also ArenaCellIterImpl which iterates
+// Iterate the free cells in an arena. See also ArenaCellIter which iterates
 // the allocated cells.
 class ArenaFreeCellIter {
   Arena* arena;

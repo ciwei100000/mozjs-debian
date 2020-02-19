@@ -9,15 +9,17 @@
 
 #ifdef JS_DEBUG
 // A hack for MFBT. Guard objects need this to work.
-#define DEBUG 1
+#  define DEBUG 1
 #endif
 
 #include "jsapi.h"
 #include "jsfriendapi.h"
 #include "js/Proxy.h"
+#include "js/CharacterEncoding.h"
 #include "js/Class.h"
 #include "js/MemoryMetrics.h"
 #include "js/Principals.h"
+#include "js/StructuredClone.h"
 #include "js/Wrapper.h"
 #include "assert.h"
 
@@ -32,11 +34,12 @@ struct ProxyTraps {
                          JS::Handle<JS::PropertyDescriptor> desc,
                          JS::ObjectOpResult& result);
   bool (*ownPropertyKeys)(JSContext* cx, JS::HandleObject proxy,
-                          JS::AutoIdVector& props);
+                          JS::MutableHandleIdVector props);
   bool (*delete_)(JSContext* cx, JS::HandleObject proxy, JS::HandleId id,
                   JS::ObjectOpResult& result);
 
-  JSObject* (*enumerate)(JSContext* cx, JS::HandleObject proxy);
+  bool (*enumerate)(JSContext* cx, JS::HandleObject proxy,
+                    JS::MutableHandleIdVector props);
 
   bool (*getPrototypeIfOrdinary)(JSContext* cx, JS::HandleObject proxy,
                                  bool* isOrdinary,
@@ -61,13 +64,10 @@ struct ProxyTraps {
   bool (*construct)(JSContext* cx, JS::HandleObject proxy,
                     const JS::CallArgs& args);
 
-  bool (*getPropertyDescriptor)(JSContext* cx, JS::HandleObject proxy,
-                                JS::HandleId id,
-                                JS::MutableHandle<JS::PropertyDescriptor> desc);
   bool (*hasOwn)(JSContext* cx, JS::HandleObject proxy, JS::HandleId id,
                  bool* bp);
   bool (*getOwnEnumerablePropertyKeys)(JSContext* cx, JS::HandleObject proxy,
-                                       JS::AutoIdVector& props);
+                                       JS::MutableHandleIdVector props);
   bool (*nativeCall)(JSContext* cx, JS::IsAcceptableThis test,
                      JS::NativeImpl impl, JS::CallArgs args);
   bool (*hasInstance)(JSContext* cx, JS::HandleObject proxy,
@@ -92,7 +92,6 @@ struct ProxyTraps {
 
   // getElements
 
-  // weakmapKeyDelegate
   // isScripted
 };
 
@@ -101,10 +100,10 @@ static int HandlerFamily;
 #define DEFER_TO_TRAP_OR_BASE_CLASS(_base)                                    \
                                                                               \
   /* Standard internal methods. */                                            \
-  virtual JSObject* enumerate(JSContext* cx, JS::HandleObject proxy)          \
-      const override {                                                        \
-    return mTraps.enumerate ? mTraps.enumerate(cx, proxy)                     \
-                            : _base::enumerate(cx, proxy);                    \
+  virtual bool enumerate(JSContext* cx, JS::HandleObject proxy,               \
+                         JS::MutableHandleIdVector props) const override {    \
+    return mTraps.enumerate ? mTraps.enumerate(cx, proxy, props)              \
+                            : _base::enumerate(cx, proxy, props);             \
   }                                                                           \
                                                                               \
   virtual bool has(JSContext* cx, JS::HandleObject proxy, JS::HandleId id,    \
@@ -147,7 +146,7 @@ static int HandlerFamily;
   }                                                                           \
                                                                               \
   virtual bool getOwnEnumerablePropertyKeys(                                  \
-      JSContext* cx, JS::HandleObject proxy, JS::AutoIdVector& props)         \
+      JSContext* cx, JS::HandleObject proxy, JS::MutableHandleIdVector props) \
       const override {                                                        \
     return mTraps.getOwnEnumerablePropertyKeys                                \
                ? mTraps.getOwnEnumerablePropertyKeys(cx, proxy, props)        \
@@ -241,7 +240,7 @@ class WrapperProxyHandler : public js::Wrapper {
   }
 
   virtual bool ownPropertyKeys(JSContext* cx, JS::HandleObject proxy,
-                               JS::AutoIdVector& props) const override {
+                               JS::MutableHandleIdVector props) const override {
     return mTraps.ownPropertyKeys
                ? mTraps.ownPropertyKeys(cx, proxy, props)
                : js::Wrapper::ownPropertyKeys(cx, proxy, props);
@@ -265,14 +264,6 @@ class WrapperProxyHandler : public js::Wrapper {
     return mTraps.isExtensible
                ? mTraps.isExtensible(cx, proxy, succeeded)
                : js::Wrapper::isExtensible(cx, proxy, succeeded);
-  }
-
-  virtual bool getPropertyDescriptor(
-      JSContext* cx, JS::HandleObject proxy, JS::HandleId id,
-      JS::MutableHandle<JS::PropertyDescriptor> desc) const override {
-    return mTraps.getPropertyDescriptor
-               ? mTraps.getPropertyDescriptor(cx, proxy, id, desc)
-               : js::Wrapper::getPropertyDescriptor(cx, proxy, id, desc);
   }
 };
 
@@ -331,7 +322,7 @@ class ForwardingProxyHandler : public js::BaseProxyHandler {
   }
 
   virtual bool ownPropertyKeys(JSContext* cx, JS::HandleObject proxy,
-                               JS::AutoIdVector& props) const override {
+                               JS::MutableHandleIdVector props) const override {
     return mTraps.ownPropertyKeys(cx, proxy, props);
   }
 
@@ -354,12 +345,6 @@ class ForwardingProxyHandler : public js::BaseProxyHandler {
   virtual bool isExtensible(JSContext* cx, JS::HandleObject proxy,
                             bool* succeeded) const override {
     return mTraps.isExtensible(cx, proxy, succeeded);
-  }
-
-  virtual bool getPropertyDescriptor(
-      JSContext* cx, JS::HandleObject proxy, JS::HandleId id,
-      JS::MutableHandle<JS::PropertyDescriptor> desc) const override {
-    return mTraps.getPropertyDescriptor(cx, proxy, id, desc);
   }
 };
 
@@ -545,50 +530,60 @@ void ReportError(JSContext* aCx, const char* aError) {
 
 bool IsWrapper(JSObject* obj) { return js::IsWrapper(obj); }
 
-JSObject* UnwrapObject(JSObject* obj, bool stopAtOuter) {
-  return js::CheckedUnwrap(obj, stopAtOuter);
+JSObject* UnwrapObjectStatic(JSObject* obj) {
+  return js::CheckedUnwrapStatic(obj);
 }
 
 JSObject* UncheckedUnwrapObject(JSObject* obj, bool stopAtOuter) {
   return js::UncheckedUnwrap(obj, stopAtOuter);
 }
 
-JS::AutoIdVector* CreateAutoIdVector(JSContext* cx) {
-  return new JS::AutoIdVector(cx);
+JS::PersistentRootedIdVector* CreateRootedIdVector(JSContext* cx) {
+  return new JS::PersistentRootedIdVector(cx);
 }
 
-bool AppendToAutoIdVector(JS::AutoIdVector* v, jsid id) {
+bool AppendToRootedIdVector(JS::PersistentRootedIdVector* v, jsid id) {
   return v->append(id);
 }
 
-const jsid* SliceAutoIdVector(const JS::AutoIdVector* v, size_t* length) {
+const jsid* SliceRootedIdVector(const JS::PersistentRootedIdVector* v,
+                                size_t* length) {
   *length = v->length();
   return v->begin();
 }
 
-void DestroyAutoIdVector(JS::AutoIdVector* v) { delete v; }
+void DestroyRootedIdVector(JS::PersistentRootedIdVector* v) { delete v; }
 
-JS::AutoObjectVector* CreateAutoObjectVector(JSContext* aCx) {
-  JS::AutoObjectVector* vec = new JS::AutoObjectVector(aCx);
+JS::MutableHandleIdVector GetMutableHandleIdVector(JS::PersistentRootedIdVector* v) {
+  return JS::MutableHandleIdVector(v);
+}
+
+JS::PersistentRootedObjectVector* CreateRootedObjectVector(
+    JSContext* aCx) {
+  JS::PersistentRootedObjectVector* vec =
+      new JS::PersistentRootedObjectVector(aCx);
   return vec;
 }
 
-bool AppendToAutoObjectVector(JS::AutoObjectVector* v, JSObject* obj) {
+bool AppendToRootedObjectVector(JS::PersistentRootedObjectVector* v,
+                                          JSObject* obj) {
   return v->append(obj);
 }
 
-void DeleteAutoObjectVector(JS::AutoObjectVector* v) { delete v; }
+void DeleteRootedObjectVector(JS::PersistentRootedObjectVector* v) {
+  delete v;
+}
 
 #if defined(__linux__)
-#include <malloc.h>
+#  include <malloc.h>
 #elif defined(__APPLE__)
-#include <malloc/malloc.h>
+#  include <malloc/malloc.h>
 #elif defined(__MINGW32__) || defined(__MINGW64__)
-  // nothing needed here
+// nothing needed here
 #elif defined(_MSC_VER)
-  // nothing needed here
+// nothing needed here
 #else
-#error "unsupported platform"
+#  error "unsupported platform"
 #endif
 
 // SpiderMonkey-in-Rust currently uses system malloc, not jemalloc.
@@ -602,7 +597,7 @@ static size_t MallocSizeOf(const void* aPtr) {
 #elif defined(_MSC_VER)
   return _msize((void*)aPtr);
 #else
-#error "unsupported platform"
+#  error "unsupported platform"
 #endif
 }
 
@@ -715,6 +710,10 @@ bool WriteBytesToJSStructuredCloneData(const uint8_t* src, size_t len,
   assert(dest != nullptr);
 
   return dest->AppendBytes(reinterpret_cast<const char*>(src), len);
+}
+
+char* JSEncodeStringToUTF8(JSContext* cx, JS::HandleString string) {
+  return JS_EncodeStringToUTF8(cx, string).release();
 }
 
 }  // extern "C"

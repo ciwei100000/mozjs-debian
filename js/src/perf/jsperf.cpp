@@ -1,4 +1,4 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*- */
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -6,6 +6,7 @@
 #include "perf/jsperf.h"
 
 #include "gc/FreeOp.h"
+#include "js/PropertySpec.h"
 #include "vm/JSContext.h" /* for error messages */
 #include "vm/JSObject.h"  /* for unwrapping without a context */
 
@@ -80,7 +81,7 @@ static bool pm_canMeasureSomething(JSContext* cx, unsigned argc, Value* vp) {
   PerfMeasurement* p = GetPM(cx, args.thisv(), "canMeasureSomething");
   if (!p) return false;
 
-  args.rval().setBoolean(p->canMeasureSomething());
+  args.rval().setBoolean(PerfMeasurement::canMeasureSomething());
   return true;
 }
 
@@ -166,10 +167,7 @@ static bool pm_construct(JSContext* cx, unsigned argc, Value* vp) {
 
   PerfMeasurement* p =
       cx->new_<PerfMeasurement>(PerfMeasurement::EventMask(mask));
-  if (!p) {
-    JS_ReportOutOfMemory(cx);
-    return false;
-  }
+  if (!p) return false;
 
   JS_SetPrivate(obj, p);
   args.rval().setObject(*obj);
@@ -189,8 +187,8 @@ static PerfMeasurement* GetPM(JSContext* cx, JS::HandleValue value,
     UniqueChars bytes =
         DecompileValueGenerator(cx, JSDVG_SEARCH_STACK, value, nullptr);
     if (!bytes) return nullptr;
-    JS_ReportErrorNumberLatin1(cx, GetErrorMessage, 0, JSMSG_NOT_NONNULL_OBJECT,
-                               bytes.get());
+    JS_ReportErrorNumberUTF8(cx, GetErrorMessage, 0, JSMSG_NOT_NONNULL_OBJECT,
+                             bytes.get());
     return nullptr;
   }
   RootedObject obj(cx, &value.toObject());

@@ -1,5 +1,5 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
- * vim: set ts=8 sts=4 et sw=4 tw=99:
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+ * vim: set ts=8 sts=2 et sw=2 tw=80:
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -8,7 +8,7 @@
 #define jit_x86_shared_Architecture_x86_h
 
 #if !defined(JS_CODEGEN_X86) && !defined(JS_CODEGEN_X64)
-#error "Unsupported architecture!"
+#  error "Unsupported architecture!"
 #endif
 
 #include "mozilla/MathAlgorithms.h"
@@ -113,7 +113,9 @@ class Registers {
 
   static Code FromName(const char* name) {
     for (size_t i = 0; i < Total; i++) {
-      if (strcmp(GetName(Code(i)), name) == 0) return Code(i);
+      if (strcmp(GetName(Code(i)), name) == 0) {
+        return Code(i);
+      }
     }
     return Invalid;
   }
@@ -147,9 +149,9 @@ class Registers {
 
 #elif defined(JS_CODEGEN_X64)
   static const SetType ArgRegMask =
-#if !defined(_WIN64)
+#  if !defined(_WIN64)
       (1 << X86Encoding::rdi) | (1 << X86Encoding::rsi) |
-#endif
+#  endif
       (1 << X86Encoding::rdx) | (1 << X86Encoding::rcx) |
       (1 << X86Encoding::r8) | (1 << X86Encoding::r9);
 
@@ -205,7 +207,9 @@ class FloatRegisters {
 
   static Encoding FromName(const char* name) {
     for (size_t i = 0; i < Total; i++) {
-      if (strcmp(GetName(Encoding(i)), name) == 0) return Encoding(i);
+      if (strcmp(GetName(Encoding(i)), name) == 0) {
+        return Encoding(i);
+      }
     }
     return Invalid;
   }
@@ -370,8 +374,12 @@ struct FloatRegister {
 
   uint32_t size() const {
     MOZ_ASSERT(!isInvalid());
-    if (isSingle()) return sizeof(float);
-    if (isDouble()) return sizeof(double);
+    if (isSingle()) {
+      return sizeof(float);
+    }
+    if (isDouble()) {
+      return sizeof(double);
+    }
     MOZ_ASSERT(isSimd128());
     return 4 * sizeof(int32_t);
   }
@@ -406,15 +414,13 @@ struct FloatRegister {
   uint32_t numAliased() const { return Codes::NumTypes; }
   uint32_t numAlignedAliased() const { return numAliased(); }
 
-  // N.B. FloatRegister is an explicit outparam here because msvc-2010
-  // miscompiled it on win64 when the value was simply returned
-  void aliased(uint32_t aliasIdx, FloatRegister* ret) const {
+  FloatRegister aliased(uint32_t aliasIdx) const {
     MOZ_ASSERT(aliasIdx < Codes::NumTypes);
-    *ret = FloatRegister(
+    return FloatRegister(
         reg_, Codes::ContentType((aliasIdx + type_) % Codes::NumTypes));
   }
-  void alignedAliased(uint32_t aliasIdx, FloatRegister* ret) const {
-    aliased(aliasIdx, ret);
+  FloatRegister alignedAliased(uint32_t aliasIdx) const {
+    return aliased(aliasIdx);
   }
 
   SetType alignedOrDominatedAliasedSet() const { return Codes::Spread << reg_; }

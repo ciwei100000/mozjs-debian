@@ -613,6 +613,10 @@ et{
         }
         MRO{
             "MRO",
+            "Mauritaania ugia (1973–2017)",
+        }
+        MRU{
+            "MRU",
             "Mauritaania ugia",
         }
         MTL{
@@ -841,6 +845,10 @@ et{
         }
         STD{
             "STD",
+            "São Tomé ja Príncipe dobra (1977–2017)",
+        }
+        STN{
+            "STN",
             "São Tomé ja Príncipe dobra",
         }
         SUR{
@@ -957,6 +965,10 @@ et{
         }
         VEF{
             "VEF",
+            "Venezuela boliivar (2008–2018)",
+        }
+        VES{
+            "VES",
             "Venezuela boliivar",
         }
         VND{
@@ -1044,7 +1056,7 @@ et{
             "vääringute testkood",
         }
         XXX{
-            "XXX",
+            "¤",
             "määramata rahaühik",
         }
         YDD{
@@ -1101,7 +1113,6 @@ et{
         BND{"$"}
         BRL{"R$"}
         BSD{"$"}
-        BYN{"р."}
         BZD{"$"}
         CAD{"$"}
         CLP{"$"}
@@ -1730,6 +1741,10 @@ et{
             other{"Macau pataakat"}
         }
         MRO{
+            one{"Mauritaania ugia (1973–2017)"}
+            other{"Mauritaania ugiat (1973–2017)"}
+        }
+        MRU{
             one{"Mauritaania ugia"}
             other{"Mauritaania ugiat"}
         }
@@ -1950,6 +1965,10 @@ et{
             other{"Lõuna-Sudaani naela"}
         }
         STD{
+            one{"São Tomé ja Príncipe dobra (1977–2017)"}
+            other{"São Tomé ja Príncipe dobrat (1977–2017)"}
+        }
+        STN{
             one{"São Tomé ja Príncipe dobra"}
             other{"São Tomé ja Príncipe dobrat"}
         }
@@ -2050,6 +2069,10 @@ et{
             other{"Venezuela boliivarit (1871–2008)"}
         }
         VEF{
+            one{"Venezuela boliivar (2008–2018)"}
+            other{"Venezuela boliivarit (2008–2018)"}
+        }
+        VES{
             one{"Venezuela boliivar"}
             other{"Venezuela boliivarit"}
         }
@@ -2158,5 +2181,5 @@ et{
         one{"{0} {1}"}
         other{"{0} {1}"}
     }
-    Version{"2.1.37.22"}
+    Version{"2.1.48.42"}
 }

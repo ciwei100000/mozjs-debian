@@ -10,7 +10,9 @@ static unsigned sRemain;
 
 static bool RequestInterruptCallback(JSContext* cx, unsigned argc, jsval* vp) {
   JS::CallArgs args = JS::CallArgsFromVp(argc, vp);
-  if (!sRemain--) JS_RequestInterruptCallback(cx);
+  if (!sRemain--) {
+    JS_RequestInterruptCallback(cx);
+  }
   args.rval().setUndefined();
   return true;
 }

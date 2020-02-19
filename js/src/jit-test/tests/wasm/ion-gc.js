@@ -1,9 +1,7 @@
-const options = getJitCompilerOptions();
-
+// |jit-test| skip-if: !getJitCompilerOptions()['baseline.enable']
 // These tests need at least baseline to make sense.
-if (!options['baseline.enable'])
-    quit();
 
+const options = getJitCompilerOptions();
 const TRIGGER = options['baseline.warmup.trigger'] + 10;
 const ITER = 2 * TRIGGER;
 const EXCEPTION_ITER = TRIGGER + 5;
@@ -11,8 +9,8 @@ const EXCEPTION_ITER = TRIGGER + 5;
 for (let type of ['i32', 'f32', 'f64']) {
     var instance = wasmEvalText(`(module
         (func $add (export "add") (result ${type}) (param ${type}) (param ${type})
-         get_local 0
-         get_local 1
+         local.get 0
+         local.get 1
          ${type}.add
         )
     )`).exports;

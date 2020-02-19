@@ -1,5 +1,5 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
- * vim: set ts=8 sts=4 et sw=4 tw=99:
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+ * vim: set ts=8 sts=2 et sw=2 tw=80:
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -19,8 +19,9 @@ namespace js {
                                             HandleString str) {
   MOZ_ASSERT(obj->numFixedSlots() == 2);
 
-  if (!EmptyShape::ensureInitialCustomShape<StringObject>(cx, obj))
+  if (!EmptyShape::ensureInitialCustomShape<StringObject>(cx, obj)) {
     return false;
+  }
 
   MOZ_ASSERT(obj->lookup(cx, NameToId(cx->names().length))->slot() ==
              LENGTH_SLOT);
@@ -34,11 +35,15 @@ namespace js {
                                                        HandleString str,
                                                        HandleObject proto,
                                                        NewObjectKind newKind) {
-  JSObject* obj = NewObjectWithClassProto(cx, &class_, proto, newKind);
-  if (!obj) return nullptr;
-  Rooted<StringObject*> strobj(cx, &obj->as<StringObject>());
-  if (!StringObject::init(cx, strobj, str)) return nullptr;
-  return strobj;
+  Rooted<StringObject*> obj(
+      cx, NewObjectWithClassProto<StringObject>(cx, proto, newKind));
+  if (!obj) {
+    return nullptr;
+  }
+  if (!StringObject::init(cx, obj, str)) {
+    return nullptr;
+  }
+  return obj;
 }
 
 }  // namespace js

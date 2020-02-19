@@ -1,26 +1,28 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
- * vim: set ts=8 sts=4 et sw=4 tw=99:
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+ * vim: set ts=8 sts=2 et sw=2 tw=80:
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "ds/Bitmap.h"
 
+#include <algorithm>
+
 #include "js/UniquePtr.h"
 
 using namespace js;
 
 SparseBitmap::~SparseBitmap() {
-  if (data.initialized()) {
-    for (Data::Range r(data.all()); !r.empty(); r.popFront())
-      js_delete(r.front().value());
+  for (Data::Range r(data.all()); !r.empty(); r.popFront()) {
+    js_delete(r.front().value());
   }
 }
 
 size_t SparseBitmap::sizeOfExcludingThis(mozilla::MallocSizeOf mallocSizeOf) {
-  size_t size = data.sizeOfExcludingThis(mallocSizeOf);
-  for (Data::Range r(data.all()); !r.empty(); r.popFront())
+  size_t size = data.shallowSizeOfExcludingThis(mallocSizeOf);
+  for (Data::Range r(data.all()); !r.empty(); r.popFront()) {
     size += mallocSizeOf(r.front().value());
+  }
   return size;
 }
 
@@ -38,8 +40,9 @@ SparseBitmap::BitBlock* SparseBitmap::createBlock(Data::AddPtr p,
 SparseBitmap::BitBlock& SparseBitmap::createBlock(
     Data::AddPtr p, size_t blockId, AutoEnterOOMUnsafeRegion& oomUnsafe) {
   BitBlock* block = createBlock(p, blockId);
-  if (!block) oomUnsafe.crash("Bitmap OOM");
-  PodZero(block);
+  if (!block) {
+    oomUnsafe.crash("Bitmap OOM");
+  }
   return *block;
 }
 
@@ -48,9 +51,10 @@ bool SparseBitmap::getBit(size_t bit) const {
   size_t blockWord = blockStartWord(word);
 
   BitBlock* block = getBlock(blockWord / WordsInBlock);
-  if (block)
+  if (block) {
     return (*block)[word - blockWord] &
            (uintptr_t(1) << (bit % JS_BITS_PER_WORD));
+  }
   return false;
 }
 
@@ -75,7 +79,9 @@ void SparseBitmap::bitwiseOrWith(const SparseBitmap& other) {
   for (Data::Range r(other.data.all()); !r.empty(); r.popFront()) {
     const BitBlock& otherBlock = *r.front().value();
     BitBlock& block = getOrCreateBlock(r.front().key());
-    for (size_t i = 0; i < WordsInBlock; i++) block[i] |= otherBlock[i];
+    for (size_t i = 0; i < WordsInBlock; i++) {
+      block[i] |= otherBlock[i];
+    }
   }
 }
 
@@ -86,9 +92,13 @@ void SparseBitmap::bitwiseOrInto(DenseBitmap& other) const {
     size_t numWords = wordIntersectCount(blockWord, other);
 #ifdef DEBUG
     // Any words out of range in other should be zero in this bitmap.
-    for (size_t i = numWords; i < WordsInBlock; i++) MOZ_ASSERT(!block[i]);
+    for (size_t i = numWords; i < WordsInBlock; i++) {
+      MOZ_ASSERT(!block[i]);
+    }
 #endif
-    for (size_t i = 0; i < numWords; i++) other.word(blockWord + i) |= block[i];
+    for (size_t i = 0; i < numWords; i++) {
+      other.word(blockWord + i) |= block[i];
+    }
   }
 }
 
@@ -102,7 +112,8 @@ void SparseBitmap::bitwiseOrRangeInto(size_t wordStart, size_t numWords,
 
   BitBlock* block = getBlock(blockWord / WordsInBlock);
   if (block) {
-    for (size_t i = 0; i < numWords; i++)
+    for (size_t i = 0; i < numWords; i++) {
       target[i] |= (*block)[wordStart - blockWord + i];
+    }
   }
 }

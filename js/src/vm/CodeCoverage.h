@@ -1,5 +1,5 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
- * vim: set ts=8 sts=4 et sw=4 tw=99:
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+ * vim: set ts=8 sts=2 et sw=2 tw=80:
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -13,6 +13,7 @@
 
 #include "js/HashTable.h"
 #include "js/TypeDecls.h"
+#include "js/Utility.h"
 
 #include "vm/Printer.h"
 
@@ -22,16 +23,14 @@ class ScriptSourceObject;
 
 namespace coverage {
 
-class LCovCompartment;
-
 class LCovSource {
  public:
-  LCovSource(LifoAlloc* alloc, const char* name);
+  LCovSource(LifoAlloc* alloc, JS::UniqueChars name);
   LCovSource(LCovSource&& src);
-  ~LCovSource();
+  ~LCovSource() = default;
 
   // Whether the given script name matches this LCovSource.
-  bool match(const char* name) const { return strcmp(name_, name) == 0; }
+  bool match(const char* name) const { return strcmp(name_.get(), name) == 0; }
 
   // Whether the current source is complete and if it can be flushed.
   bool isComplete() const { return hasTopLevelScript_; }
@@ -42,7 +41,7 @@ class LCovSource {
 
   // Write the Lcov output in a buffer, such as the one associated with
   // the runtime code coverage trace file.
-  void exportInto(GenericPrinter& out) const;
+  void exportInto(GenericPrinter& out);
 
  private:
   // Write the script name in out.
@@ -50,7 +49,7 @@ class LCovSource {
 
  private:
   // Name of the source file.
-  const char* name_;
+  JS::UniqueChars name_;
 
   // LifoAlloc strings which hold the filename of each function as
   // well as the number of hits for each function.
@@ -77,13 +76,13 @@ class LCovSource {
   bool hasTopLevelScript_ : 1;
 };
 
-class LCovCompartment {
+class LCovRealm {
  public:
-  LCovCompartment();
-  ~LCovCompartment();
+  LCovRealm();
+  ~LCovRealm();
 
   // Collect code coverage information for the given source.
-  void collectCodeCoverageInfo(JSCompartment* comp, JSScript* topLevel,
+  void collectCodeCoverageInfo(JS::Realm* realm, JSScript* topLevel,
                                const char* name);
 
   // Write the Lcov output in a buffer, such as the one associated with
@@ -92,10 +91,10 @@ class LCovCompartment {
 
  private:
   // Write the script name in out.
-  bool writeCompartmentName(JSCompartment* comp);
+  bool writeRealmName(JS::Realm* realm);
 
   // Return the LCovSource entry which matches the given ScriptSourceObject.
-  LCovSource* lookupOrAdd(JSCompartment* comp, const char* name);
+  LCovSource* lookupOrAdd(JS::Realm* realm, const char* name);
 
  private:
   typedef mozilla::Vector<LCovSource, 16, LifoAllocPolicy<Fallible>>
@@ -105,10 +104,10 @@ class LCovCompartment {
   // strings to be written in the file.
   LifoAlloc alloc_;
 
-  // LifoAlloc string which hold the name of the compartment.
+  // LifoAlloc string which hold the name of the realm.
   LSprinter outTN_;
 
-  // Vector of all sources which are used in this compartment.
+  // Vector of all sources which are used in this realm.
   LCovSourceVector* sources_;
 };
 
@@ -126,12 +125,9 @@ class LCovRuntime {
   // all the scripts executed in the current JSRuntime.
   void init();
 
-  // Check if we should collect code coverage information.
-  bool isEnabled() const { return out_.isInitialized(); }
-
-  // Write the aggregated result of the code coverage of a compartment
+  // Write the aggregated result of the code coverage of a realm
   // into a file.
-  void writeLCovResult(LCovCompartment& comp);
+  void writeLCovResult(LCovRealm& realm);
 
  private:
   // When a process forks, the file will remain open, but 2 processes will
@@ -160,6 +156,15 @@ class LCovRuntime {
   // file is not a valid LCov file.
   bool isEmpty_;
 };
+
+extern void InitLCov();
+
+extern void EnableLCov();
+
+inline bool IsLCovEnabled() {
+  extern bool gLCovIsEnabled;
+  return gLCovIsEnabled;
+}
 
 }  // namespace coverage
 }  // namespace js

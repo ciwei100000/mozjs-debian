@@ -1,5 +1,5 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
- * vim: set ts=8 sts=4 et sw=4 tw=99:
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+ * vim: set ts=8 sts=2 et sw=2 tw=80:
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -16,7 +16,7 @@ class JitRuntime;
 
 // During Ion compilation we need access to various bits of the current
 // compartment, runtime and so forth. However, since compilation can run off
-// thread while the active thread is mutating the VM, this access needs
+// thread while the main thread is mutating the VM, this access needs
 // to be restricted. The classes below give the compiler an interface to access
 // all necessary information in a threadsafe fashion.
 
@@ -27,7 +27,7 @@ class CompileRuntime {
   static CompileRuntime* get(JSRuntime* rt);
 
 #ifdef JS_GC_ZEAL
-  const void* addressOfGCZealModeBits();
+  const uint32_t* addressOfGCZealModeBits();
 #endif
 
   const JitRuntime* jitRuntime();
@@ -45,7 +45,12 @@ class CompileRuntime {
   const Value& NaNValue();
   const Value& positiveInfinityValue();
   const WellKnownSymbols& wellKnownSymbols();
-  const void* addressOfActiveJSContext();
+
+  const void* mainContextPtr();
+  uint32_t* addressOfTenuredAllocCount();
+  const void* addressOfJitStackLimit();
+  const void* addressOfInterruptBits();
+  const void* addressOfZone();
 
 #ifdef DEBUG
   bool isInsideNursery(gc::Cell* cell);
@@ -70,39 +75,44 @@ class CompileZone {
   const void* addressOfIonBailAfter();
 #endif
 
-  const void* addressOfJSContext();
-  const void* addressOfNeedsIncrementalBarrier();
-  const void* addressOfFreeList(gc::AllocKind allocKind);
-  const void* addressOfNurseryPosition();
-  const void* addressOfStringNurseryPosition();
+  const uint32_t* addressOfNeedsIncrementalBarrier();
+  gc::FreeSpan** addressOfFreeList(gc::AllocKind allocKind);
+  void* addressOfNurseryPosition();
+  void* addressOfStringNurseryPosition();
   const void* addressOfNurseryCurrentEnd();
   const void* addressOfStringNurseryCurrentEnd();
+
+  uint32_t* addressOfNurseryAllocCount();
 
   bool nurseryExists();
   bool canNurseryAllocateStrings();
   void setMinorGCShouldCancelIonCompilations();
 };
 
-class JitCompartment;
+class JitRealm;
 
-class CompileCompartment {
-  JSCompartment* compartment();
+class CompileRealm {
+  JS::Realm* realm();
 
  public:
-  static CompileCompartment* get(JSCompartment* comp);
+  static CompileRealm* get(JS::Realm* realm);
 
   CompileZone* zone();
   CompileRuntime* runtime();
 
-  const void* addressOfRandomNumberGenerator();
+  const void* realmPtr() { return realm(); }
 
-  const JitCompartment* jitCompartment();
+  const mozilla::non_crypto::XorShift128PlusRNG*
+  addressOfRandomNumberGenerator();
+
+  const JitRealm* jitRealm();
 
   const GlobalObject* maybeGlobal();
+  const uint32_t* addressOfGlobalWriteBarriered();
 
   bool hasAllocationMetadataBuilder();
 
-  // Mirror CompartmentOptions.
+  // Mirror RealmOptions.
   void setSingletonsAsValues();
 };
 

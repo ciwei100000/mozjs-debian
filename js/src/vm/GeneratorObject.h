@@ -1,5 +1,5 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
- * vim: set ts=8 sts=4 et sw=4 tw=99:
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+ * vim: set ts=8 sts=2 et sw=2 tw=80:
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -7,6 +7,7 @@
 #ifndef vm_GeneratorObject_h
 #define vm_GeneratorObject_h
 
+#include "js/Class.h"
 #include "vm/ArgumentsObject.h"
 #include "vm/ArrayObject.h"
 #include "vm/JSContext.h"
@@ -15,50 +16,50 @@
 
 namespace js {
 
-class GeneratorObject : public NativeObject {
+enum class GeneratorResumeKind { Next, Throw, Return };
+
+class AbstractGeneratorObject : public NativeObject {
  public:
-  // Magic values stored in the yield index slot when the generator is
-  // running or closing. See the yield index comment below.
-  static const int32_t YIELD_AND_AWAIT_INDEX_RUNNING = INT32_MAX;
-  static const int32_t YIELD_AND_AWAIT_INDEX_CLOSING = INT32_MAX - 1;
+  // Magic value stored in the resumeIndex slot when the generator is
+  // running or closing. See the resumeIndex comment below.
+  static const int32_t RESUME_INDEX_RUNNING = INT32_MAX;
 
   enum {
     CALLEE_SLOT = 0,
     ENV_CHAIN_SLOT,
     ARGS_OBJ_SLOT,
     EXPRESSION_STACK_SLOT,
-    YIELD_AND_AWAIT_INDEX_SLOT,
-    NEWTARGET_SLOT,
+    RESUME_INDEX_SLOT,
     RESERVED_SLOTS
   };
-
-  enum ResumeKind { NEXT, THROW, RETURN };
-
-  static const Class class_;
 
  private:
   static bool suspend(JSContext* cx, HandleObject obj, AbstractFramePtr frame,
                       jsbytecode* pc, Value* vp, unsigned nvalues);
 
  public:
-  static inline ResumeKind getResumeKind(jsbytecode* pc) {
+  static GeneratorResumeKind getResumeKind(jsbytecode* pc) {
     MOZ_ASSERT(*pc == JSOP_RESUME);
-    unsigned arg = GET_UINT16(pc);
-    MOZ_ASSERT(arg <= RETURN);
-    return static_cast<ResumeKind>(arg);
+    unsigned arg = GET_UINT8(pc);
+    MOZ_ASSERT(arg <= unsigned(GeneratorResumeKind::Return));
+    return static_cast<GeneratorResumeKind>(arg);
   }
 
-  static inline ResumeKind getResumeKind(JSContext* cx, JSAtom* atom) {
-    if (atom == cx->names().next) return NEXT;
-    if (atom == cx->names().throw_) return THROW;
+  static GeneratorResumeKind getResumeKind(JSContext* cx, JSAtom* atom) {
+    if (atom == cx->names().next) {
+      return GeneratorResumeKind::Next;
+    }
+    if (atom == cx->names().throw_) {
+      return GeneratorResumeKind::Throw;
+    }
     MOZ_ASSERT(atom == cx->names().return_);
-    return RETURN;
+    return GeneratorResumeKind::Return;
   }
 
   static JSObject* create(JSContext* cx, AbstractFramePtr frame);
 
   static bool resume(JSContext* cx, InterpreterActivation& activation,
-                     HandleObject obj, HandleValue arg, ResumeKind resumeKind);
+                     Handle<AbstractGeneratorObject*> genObj, HandleValue arg);
 
   static bool initialSuspend(JSContext* cx, HandleObject obj,
                              AbstractFramePtr frame, jsbytecode* pc) {
@@ -111,65 +112,52 @@ class GeneratorObject : public NativeObject {
     setFixedSlot(EXPRESSION_STACK_SLOT, NullValue());
   }
 
-  bool isConstructing() const {
-    return getFixedSlot(NEWTARGET_SLOT).isObject();
-  }
-  const Value& newTarget() const { return getFixedSlot(NEWTARGET_SLOT); }
-  void setNewTarget(const Value& newTarget) {
-    setFixedSlot(NEWTARGET_SLOT, newTarget);
-  }
-
-  // The yield index slot is abused for a few purposes.  It's undefined if
+  // The resumeIndex slot is abused for a few purposes.  It's undefined if
   // it hasn't been set yet (before the initial yield), and null if the
-  // generator is closed. If the generator is running, the yield index is
-  // YIELD_AND_AWAIT_INDEX_RUNNING. If the generator is in that bizarre
-  // "closing" state, the yield index is YIELD_AND_AWAIT_INDEX_CLOSING.
+  // generator is closed. If the generator is running, the resumeIndex is
+  // RESUME_INDEX_RUNNING.
   //
-  // If the generator is suspended, it's the yield index (stored as
-  // JSOP_INITIALYIELD/JSOP_YIELD/JSOP_AWAIT operand) of the yield
-  // instruction that suspended the generator. The yield index can be mapped
-  // to the bytecode offset (interpreter) or to the native code offset (JIT).
+  // If the generator is suspended, it's the resumeIndex (stored as
+  // JSOP_INITIALYIELD/JSOP_YIELD/JSOP_AWAIT operand) of the yield instruction
+  // that suspended the generator. The resumeIndex can be mapped to the
+  // bytecode offset (interpreter) or to the native code offset (JIT).
 
-  bool isRunning() const {
-    MOZ_ASSERT(!isClosed());
-    return getFixedSlot(YIELD_AND_AWAIT_INDEX_SLOT).toInt32() ==
-           YIELD_AND_AWAIT_INDEX_RUNNING;
+  bool isBeforeInitialYield() const {
+    return getFixedSlot(RESUME_INDEX_SLOT).isUndefined();
   }
-  bool isClosing() const {
-    return getFixedSlot(YIELD_AND_AWAIT_INDEX_SLOT).toInt32() ==
-           YIELD_AND_AWAIT_INDEX_CLOSING;
+  bool isRunning() const {
+    return getFixedSlot(RESUME_INDEX_SLOT) == Int32Value(RESUME_INDEX_RUNNING);
   }
   bool isSuspended() const {
     // Note: also update Baseline's IsSuspendedGenerator code if this
     // changes.
-    MOZ_ASSERT(!isClosed());
-    static_assert(
-        YIELD_AND_AWAIT_INDEX_CLOSING < YIELD_AND_AWAIT_INDEX_RUNNING,
-        "test below should return false for YIELD_AND_AWAIT_INDEX_RUNNING");
-    return getFixedSlot(YIELD_AND_AWAIT_INDEX_SLOT).toInt32() <
-           YIELD_AND_AWAIT_INDEX_CLOSING;
+    Value resumeIndex = getFixedSlot(RESUME_INDEX_SLOT);
+    return resumeIndex.isInt32() && resumeIndex.toInt32() < RESUME_INDEX_RUNNING;
   }
   void setRunning() {
     MOZ_ASSERT(isSuspended());
-    setFixedSlot(YIELD_AND_AWAIT_INDEX_SLOT,
-                 Int32Value(YIELD_AND_AWAIT_INDEX_RUNNING));
+    setFixedSlot(RESUME_INDEX_SLOT, Int32Value(RESUME_INDEX_RUNNING));
   }
-  void setClosing() {
+  void setResumeIndex(jsbytecode* pc) {
+    MOZ_ASSERT(*pc == JSOP_INITIALYIELD || *pc == JSOP_YIELD ||
+               *pc == JSOP_AWAIT);
+
+    MOZ_ASSERT_IF(JSOp(*pc) == JSOP_INITIALYIELD,
+                  getFixedSlot(RESUME_INDEX_SLOT).isUndefined());
+    MOZ_ASSERT_IF(JSOp(*pc) != JSOP_INITIALYIELD, isRunning());
+
+    uint32_t resumeIndex = GET_UINT24(pc);
+    MOZ_ASSERT(resumeIndex < uint32_t(RESUME_INDEX_RUNNING));
+
+    setFixedSlot(RESUME_INDEX_SLOT, Int32Value(resumeIndex));
     MOZ_ASSERT(isSuspended());
-    setFixedSlot(YIELD_AND_AWAIT_INDEX_SLOT,
-                 Int32Value(YIELD_AND_AWAIT_INDEX_CLOSING));
   }
-  void setYieldAndAwaitIndex(uint32_t yieldAndAwaitIndex) {
-    MOZ_ASSERT_IF(yieldAndAwaitIndex == 0,
-                  getFixedSlot(YIELD_AND_AWAIT_INDEX_SLOT).isUndefined());
-    MOZ_ASSERT_IF(yieldAndAwaitIndex != 0, isRunning() || isClosing());
-    MOZ_ASSERT(yieldAndAwaitIndex < uint32_t(YIELD_AND_AWAIT_INDEX_CLOSING));
-    setFixedSlot(YIELD_AND_AWAIT_INDEX_SLOT, Int32Value(yieldAndAwaitIndex));
-    MOZ_ASSERT(isSuspended());
+  void setResumeIndex(int32_t resumeIndex) {
+    setFixedSlot(RESUME_INDEX_SLOT, Int32Value(resumeIndex));
   }
-  uint32_t yieldAndAwaitIndex() const {
+  uint32_t resumeIndex() const {
     MOZ_ASSERT(isSuspended());
-    return getFixedSlot(YIELD_AND_AWAIT_INDEX_SLOT).toInt32();
+    return getFixedSlot(RESUME_INDEX_SLOT).toInt32();
   }
   bool isClosed() const { return getFixedSlot(CALLEE_SLOT).isNull(); }
   void setClosed() {
@@ -177,8 +165,7 @@ class GeneratorObject : public NativeObject {
     setFixedSlot(ENV_CHAIN_SLOT, NullValue());
     setFixedSlot(ARGS_OBJ_SLOT, NullValue());
     setFixedSlot(EXPRESSION_STACK_SLOT, NullValue());
-    setFixedSlot(YIELD_AND_AWAIT_INDEX_SLOT, NullValue());
-    setFixedSlot(NEWTARGET_SLOT, NullValue());
+    setFixedSlot(RESUME_INDEX_SLOT, NullValue());
   }
 
   bool isAfterYield();
@@ -195,24 +182,49 @@ class GeneratorObject : public NativeObject {
   static size_t offsetOfArgsObjSlot() {
     return getFixedSlotOffset(ARGS_OBJ_SLOT);
   }
-  static size_t offsetOfYieldAndAwaitIndexSlot() {
-    return getFixedSlotOffset(YIELD_AND_AWAIT_INDEX_SLOT);
+  static size_t offsetOfResumeIndexSlot() {
+    return getFixedSlotOffset(RESUME_INDEX_SLOT);
   }
   static size_t offsetOfExpressionStackSlot() {
     return getFixedSlotOffset(EXPRESSION_STACK_SLOT);
   }
-  static size_t offsetOfNewTargetSlot() {
-    return getFixedSlotOffset(NEWTARGET_SLOT);
-  }
+};
+
+class GeneratorObject : public AbstractGeneratorObject {
+ public:
+  enum { RESERVED_SLOTS = AbstractGeneratorObject::RESERVED_SLOTS };
+
+  static const Class class_;
+
+  static GeneratorObject* create(JSContext* cx, HandleFunction fun);
 };
 
 bool GeneratorThrowOrReturn(JSContext* cx, AbstractFramePtr frame,
-                            Handle<GeneratorObject*> obj, HandleValue val,
-                            uint32_t resumeKind);
+                            Handle<AbstractGeneratorObject*> obj,
+                            HandleValue val, GeneratorResumeKind resumeKind);
+
+/**
+ * Return the generator object associated with the given frame. The frame must
+ * be a call frame for a generator.
+ *
+ * This may return nullptr at certain points in the generator lifecycle:
+ *
+ * - While a generator call evaluates default argument values and performs
+ *   destructuring, which occurs before the generator object is created.
+ *
+ * - Between the `GENERATOR` instruction and the `SETALIASEDVAR .generator`
+ *   instruction, at which point the generator object does exist, but is held
+ *   only on the stack, and not the `.generator` pseudo-variable this function
+ *   consults.
+ */
+AbstractGeneratorObject* GetGeneratorObjectForFrame(JSContext* cx,
+                                                    AbstractFramePtr frame);
+
 void SetGeneratorClosed(JSContext* cx, AbstractFramePtr frame);
 
-MOZ_MUST_USE bool CheckGeneratorResumptionValue(JSContext* cx, HandleValue v);
-
 }  // namespace js
+
+template <>
+bool JSObject::is<js::AbstractGeneratorObject>() const;
 
 #endif /* vm_GeneratorObject_h */

@@ -1,14 +1,15 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
- * vim: set ts=8 sts=4 et sw=4 tw=99:
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+ * vim: set ts=8 sts=2 et sw=2 tw=80:
  */
 
 #include "jsfriendapi.h"
 
+#include "js/ArrayBuffer.h"  // JS::NewArrayBuffer
 #include "jsapi-tests/tests.h"
-#include "vm/JSCompartment.h"
 #include "vm/ProxyObject.h"
+#include "vm/Realm.h"
 
-#include "vm/JSCompartment-inl.h"
+#include "vm/Realm-inl.h"
 
 using namespace js;
 
@@ -66,8 +67,10 @@ BEGIN_TEST(testArrayBufferView_type) {
 }
 
 static JSObject* CreateDataView(JSContext* cx) {
-  JS::Rooted<JSObject*> buffer(cx, JS_NewArrayBuffer(cx, 8));
-  if (!buffer) return nullptr;
+  JS::Rooted<JSObject*> buffer(cx, JS::NewArrayBuffer(cx, 8));
+  if (!buffer) {
+    return nullptr;
+  }
   return JS_NewDataView(cx, buffer, 0, 8);
 }
 
@@ -106,7 +109,7 @@ bool TestViewType(JSContext* cx) {
     CHECK(len == ExpectedLength);
   }
 
-  JS::CompartmentOptions options;
+  JS::RealmOptions options;
   JS::RootedObject otherGlobal(
       cx, JS_NewGlobalObject(cx, basicGlobalClass(), nullptr,
                              JS::DontFireOnNewGlobalHook, options));
@@ -114,8 +117,8 @@ bool TestViewType(JSContext* cx) {
 
   JS::Rooted<JSObject*> buffer(cx);
   {
-    AutoCompartment ac(cx, otherGlobal);
-    buffer = JS_NewArrayBuffer(cx, 8);
+    AutoRealm ar(cx, otherGlobal);
+    buffer = JS::NewArrayBuffer(cx, 8);
     CHECK(buffer);
     CHECK(buffer->as<ArrayBufferObject>().byteLength() == 8);
   }

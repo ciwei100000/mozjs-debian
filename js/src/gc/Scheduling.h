@@ -1,10 +1,12 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
- * vim: set ts=8 sts=4 et sw=4 tw=99:
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+ * vim: set ts=8 sts=2 et sw=2 tw=80:
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 /*
+ * [SMDOC] GC Scheduling
+ *
  * GC Scheduling Overview
  * ======================
  *
@@ -88,13 +90,13 @@
  *
  *  While code generally takes the above factors into account in only an ad-hoc
  *  fashion, the API forces the user to pick a "reason" for the GC. We have a
- *  bunch of JS::gcreason reasons in GCAPI.h. These fall into a few categories
+ *  bunch of JS::GCReason reasons in GCAPI.h. These fall into a few categories
  *  that generally coincide with one or more of the above factors.
  *
  *  Embedding reasons:
  *
  *   1) Do a GC now because the embedding knows something useful about the
- *      zone's memory retention state. These are gcreasons like LOAD_END,
+ *      zone's memory retention state. These are GCReasons like LOAD_END,
  *      PAGE_HIDE, SET_NEW_DOCUMENT, DOM_UTILS. Mostly, Gecko uses these to
  *      indicate that a significant fraction of the scheduled zone's memory is
  *      probably reclaimable.
@@ -306,9 +308,29 @@
 #define gc_Scheduling_h
 
 #include "mozilla/Atomics.h"
+#include "mozilla/DebugOnly.h"
+
+#include "js/HashTable.h"
 
 namespace js {
+
+#define JS_FOR_EACH_INTERNAL_MEMORY_USE(_)      \
+  _(ArrayBufferContents)                        \
+  _(StringContents)
+
+#define JS_FOR_EACH_MEMORY_USE(_)               \
+  JS_FOR_EACH_PUBLIC_MEMORY_USE(_)              \
+  JS_FOR_EACH_INTERNAL_MEMORY_USE(_)
+
+enum class MemoryUse : uint8_t {
+#define DEFINE_MEMORY_USE(Name) Name,
+  JS_FOR_EACH_MEMORY_USE(DEFINE_MEMORY_USE)
+#undef DEFINE_MEMORY_USE
+};
+
 namespace gc {
+
+struct Cell;
 
 enum TriggerKind { NoTrigger = 0, IncrementalTrigger, NonIncrementalTrigger };
 
@@ -332,11 +354,13 @@ class GCSchedulingTunables {
   UnprotectedData<size_t> maxMallocBytes_;
 
   /*
+   * JSGC_MIN_NURSERY_BYTES
    * JSGC_MAX_NURSERY_BYTES
    *
-   * Maximum nursery size for each zone group.
+   * Minimum and maximum nursery size for each runtime.
    */
-  ActiveThreadData<size_t> gcMaxNurseryBytes_;
+  MainThreadData<size_t> gcMinNurseryBytes_;
+  MainThreadData<size_t> gcMaxNurseryBytes_;
 
   /*
    * JSGC_ALLOCATION_THRESHOLD
@@ -345,21 +369,21 @@ class GCSchedulingTunables {
    * usage.gcBytes() surpasses threshold.gcTriggerBytes() for a zone, the
    * zone may be scheduled for a GC, depending on the exact circumstances.
    */
-  ActiveThreadOrGCTaskData<size_t> gcZoneAllocThresholdBase_;
+  MainThreadOrGCTaskData<size_t> gcZoneAllocThresholdBase_;
 
   /*
    * JSGC_ALLOCATION_THRESHOLD_FACTOR
    *
    * Fraction of threshold.gcBytes() which triggers an incremental GC.
    */
-  UnprotectedData<double> allocThresholdFactor_;
+  UnprotectedData<float> allocThresholdFactor_;
 
   /*
    * JSGC_ALLOCATION_THRESHOLD_FACTOR_AVOID_INTERRUPT
    *
    * The same except when doing so would interrupt an already running GC.
    */
-  UnprotectedData<double> allocThresholdFactorAvoidInterrupt_;
+  UnprotectedData<float> allocThresholdFactorAvoidInterrupt_;
 
   /*
    * Number of bytes to allocate between incremental slices in GCs triggered
@@ -375,15 +399,15 @@ class GCSchedulingTunables {
    * Totally disables |highFrequencyGC|, the HeapGrowthFactor, and other
    * tunables that make GC non-deterministic.
    */
-  ActiveThreadData<bool> dynamicHeapGrowthEnabled_;
+  MainThreadData<bool> dynamicHeapGrowthEnabled_;
 
   /*
    * JSGC_HIGH_FREQUENCY_TIME_LIMIT
    *
    * We enter high-frequency mode if we GC a twice within this many
-   * microseconds. This value is stored directly in microseconds.
+   * microseconds.
    */
-  ActiveThreadData<uint64_t> highFrequencyThresholdUsec_;
+  MainThreadData<mozilla::TimeDuration> highFrequencyThreshold_;
 
   /*
    * JSGC_HIGH_FREQUENCY_LOW_LIMIT
@@ -394,10 +418,10 @@ class GCSchedulingTunables {
    * When in the |highFrequencyGC| mode, these parameterize the per-zone
    * "HeapGrowthFactor" computation.
    */
-  ActiveThreadData<uint64_t> highFrequencyLowLimitBytes_;
-  ActiveThreadData<uint64_t> highFrequencyHighLimitBytes_;
-  ActiveThreadData<double> highFrequencyHeapGrowthMax_;
-  ActiveThreadData<double> highFrequencyHeapGrowthMin_;
+  MainThreadData<size_t> highFrequencyLowLimitBytes_;
+  MainThreadData<size_t> highFrequencyHighLimitBytes_;
+  MainThreadData<float> highFrequencyHeapGrowthMax_;
+  MainThreadData<float> highFrequencyHeapGrowthMin_;
 
   /*
    * JSGC_LOW_FREQUENCY_HEAP_GROWTH
@@ -405,14 +429,14 @@ class GCSchedulingTunables {
    * When not in |highFrequencyGC| mode, this is the global (stored per-zone)
    * "HeapGrowthFactor".
    */
-  ActiveThreadData<double> lowFrequencyHeapGrowth_;
+  MainThreadData<float> lowFrequencyHeapGrowth_;
 
   /*
    * JSGC_DYNAMIC_MARK_SLICE
    *
    * Doubles the length of IGC slices when in the |highFrequencyGC| mode.
    */
-  ActiveThreadData<bool> dynamicMarkSliceEnabled_;
+  MainThreadData<bool> dynamicMarkSliceEnabled_;
 
   /*
    * JSGC_MIN_EMPTY_CHUNK_COUNT
@@ -423,11 +447,49 @@ class GCSchedulingTunables {
   UnprotectedData<uint32_t> minEmptyChunkCount_;
   UnprotectedData<uint32_t> maxEmptyChunkCount_;
 
+  /*
+   * JSGC_NURSERY_FREE_THRESHOLD_FOR_IDLE_COLLECTION
+   * JSGC_NURSERY_FREE_THRESHOLD_FOR_IDLE_COLLECTION_FRACTION
+   *
+   * Attempt to run a minor GC in the idle time if the free space falls
+   * below this threshold. The absolute threshold is used when the nursery is
+   * large and the percentage when it is small.  See Nursery::shouldCollect()
+   */
+  UnprotectedData<uint32_t> nurseryFreeThresholdForIdleCollection_;
+  UnprotectedData<float> nurseryFreeThresholdForIdleCollectionFraction_;
+
+  /*
+   * JSGC_PRETENURE_THRESHOLD
+   *
+   * Fraction of objects tenured to trigger pretenuring (between 0 and 1). If
+   * this fraction is met, the GC proceeds to calculate which objects will be
+   * tenured. If this is 1.0f (actually if it is not < 1.0f) then pretenuring
+   * is disabled.
+   */
+  UnprotectedData<float> pretenureThreshold_;
+
+  /*
+   * JSGC_PRETENURE_GROUP_THRESHOLD
+   *
+   * During a single nursery collection, if this many objects from the same
+   * object group are tenured, then that group will be pretenured.
+   */
+  UnprotectedData<uint32_t> pretenureGroupThreshold_;
+
+  /*
+   * JSGC_MIN_LAST_DITCH_GC_PERIOD
+   *
+   * Last ditch GC is skipped if allocation failure occurs less than this many
+   * seconds from the previous one.
+   */
+  MainThreadData<mozilla::TimeDuration> minLastDitchGCPeriod_;
+
  public:
   GCSchedulingTunables();
 
   size_t gcMaxBytes() const { return gcMaxBytes_; }
   size_t maxMallocBytes() const { return maxMallocBytes_; }
+  size_t gcMinNurseryBytes() const { return gcMinNurseryBytes_; }
   size_t gcMaxNurseryBytes() const { return gcMaxNurseryBytes_; }
   size_t gcZoneAllocThresholdBase() const { return gcZoneAllocThresholdBase_; }
   double allocThresholdFactor() const { return allocThresholdFactor_; }
@@ -436,13 +498,13 @@ class GCSchedulingTunables {
   }
   size_t zoneAllocDelayBytes() const { return zoneAllocDelayBytes_; }
   bool isDynamicHeapGrowthEnabled() const { return dynamicHeapGrowthEnabled_; }
-  uint64_t highFrequencyThresholdUsec() const {
-    return highFrequencyThresholdUsec_;
+  const mozilla::TimeDuration& highFrequencyThreshold() const {
+    return highFrequencyThreshold_;
   }
-  uint64_t highFrequencyLowLimitBytes() const {
+  size_t highFrequencyLowLimitBytes() const {
     return highFrequencyLowLimitBytes_;
   }
-  uint64_t highFrequencyHighLimitBytes() const {
+  size_t highFrequencyHighLimitBytes() const {
     return highFrequencyHighLimitBytes_;
   }
   double highFrequencyHeapGrowthMax() const {
@@ -457,6 +519,20 @@ class GCSchedulingTunables {
     return minEmptyChunkCount_;
   }
   unsigned maxEmptyChunkCount() const { return maxEmptyChunkCount_; }
+  uint32_t nurseryFreeThresholdForIdleCollection() const {
+    return nurseryFreeThresholdForIdleCollection_;
+  }
+  float nurseryFreeThresholdForIdleCollectionFraction() const {
+    return nurseryFreeThresholdForIdleCollectionFraction_;
+  }
+
+  bool attemptPretenuring() const { return pretenureThreshold_ < 1.0f; }
+  float pretenureThreshold() const { return pretenureThreshold_; }
+  uint32_t pretenureGroupThreshold() const { return pretenureGroupThreshold_; }
+
+  mozilla::TimeDuration minLastDitchGCPeriod() const {
+    return minLastDitchGCPeriod_;
+  }
 
   MOZ_MUST_USE bool setParameter(JSGCParamKey key, uint32_t value,
                                  const AutoLockGC& lock);
@@ -465,11 +541,11 @@ class GCSchedulingTunables {
   void setMaxMallocBytes(size_t value);
 
  private:
-  void setHighFrequencyLowLimit(uint64_t value);
-  void setHighFrequencyHighLimit(uint64_t value);
-  void setHighFrequencyHeapGrowthMin(double value);
-  void setHighFrequencyHeapGrowthMax(double value);
-  void setLowFrequencyHeapGrowth(double value);
+  void setHighFrequencyLowLimit(size_t value);
+  void setHighFrequencyHighLimit(size_t value);
+  void setHighFrequencyHeapGrowthMin(float value);
+  void setHighFrequencyHeapGrowthMax(float value);
+  void setLowFrequencyHeapGrowth(float value);
   void setMinEmptyChunkCount(uint32_t value);
   void setMaxEmptyChunkCount(uint32_t value);
 };
@@ -481,34 +557,39 @@ class GCSchedulingState {
    * growth factor is a measure of how large (as a percentage of the last GC)
    * the heap is allowed to grow before we try to schedule another GC.
    */
-  ActiveThreadData<bool> inHighFrequencyGCMode_;
+  MainThreadData<bool> inHighFrequencyGCMode_;
 
  public:
   GCSchedulingState() : inHighFrequencyGCMode_(false) {}
 
   bool inHighFrequencyGCMode() const { return inHighFrequencyGCMode_; }
 
-  void updateHighFrequencyMode(uint64_t lastGCTime, uint64_t currentTime,
+  void updateHighFrequencyMode(const mozilla::TimeStamp& lastGCTime,
+                               const mozilla::TimeStamp& currentTime,
                                const GCSchedulingTunables& tunables) {
     inHighFrequencyGCMode_ =
-        tunables.isDynamicHeapGrowthEnabled() && lastGCTime &&
-        lastGCTime + tunables.highFrequencyThresholdUsec() > currentTime;
+        tunables.isDynamicHeapGrowthEnabled() && !lastGCTime.IsNull() &&
+        lastGCTime + tunables.highFrequencyThreshold() > currentTime;
   }
 };
 
 class MemoryCounter {
   // Bytes counter to measure memory pressure for GC scheduling. It counts
   // upwards from zero.
-  mozilla::Atomic<size_t, mozilla::ReleaseAcquire> bytes_;
+  mozilla::Atomic<size_t, mozilla::ReleaseAcquire,
+                  mozilla::recordreplay::Behavior::DontPreserve>
+      bytes_;
 
   // GC trigger threshold for memory allocations.
   size_t maxBytes_;
 
   // The counter value at the start of a GC.
-  ActiveThreadData<size_t> bytesAtStartOfGC_;
+  MainThreadData<size_t> bytesAtStartOfGC_;
 
   // Which kind of GC has been triggered if any.
-  mozilla::Atomic<TriggerKind, mozilla::ReleaseAcquire> triggered_;
+  mozilla::Atomic<TriggerKind, mozilla::ReleaseAcquire,
+                  mozilla::recordreplay::Behavior::DontPreserve>
+      triggered_;
 
  public:
   MemoryCounter();
@@ -524,10 +605,13 @@ class MemoryCounter {
   void adopt(MemoryCounter& other);
 
   TriggerKind shouldTriggerGC(const GCSchedulingTunables& tunables) const {
-    if (MOZ_LIKELY(bytes_ < maxBytes_ * tunables.allocThresholdFactor()))
+    if (MOZ_LIKELY(bytes_ < maxBytes_ * tunables.allocThresholdFactor())) {
       return NoTrigger;
+    }
 
-    if (bytes_ < maxBytes_) return IncrementalTrigger;
+    if (bytes_ < maxBytes_) {
+      return IncrementalTrigger;
+    }
 
     return NonIncrementalTrigger;
   }
@@ -541,26 +625,25 @@ class MemoryCounter {
   void updateOnGCStart();
   void updateOnGCEnd(const GCSchedulingTunables& tunables,
                      const AutoLockGC& lock);
-
- private:
-  void reset();
 };
 
 // This class encapsulates the data that determines when we need to do a zone
 // GC.
 class ZoneHeapThreshold {
   // The "growth factor" for computing our next thresholds after a GC.
-  GCLockData<double> gcHeapGrowthFactor_;
+  GCLockData<float> gcHeapGrowthFactor_;
 
   // GC trigger threshold for allocations on the GC heap.
-  mozilla::Atomic<size_t, mozilla::Relaxed> gcTriggerBytes_;
+  mozilla::Atomic<size_t, mozilla::Relaxed,
+                  mozilla::recordreplay::Behavior::DontPreserve>
+      gcTriggerBytes_;
 
  public:
-  ZoneHeapThreshold() : gcHeapGrowthFactor_(3.0), gcTriggerBytes_(0) {}
+  ZoneHeapThreshold() : gcHeapGrowthFactor_(3.0f), gcTriggerBytes_(0) {}
 
-  double gcHeapGrowthFactor() const { return gcHeapGrowthFactor_; }
+  float gcHeapGrowthFactor() const { return gcHeapGrowthFactor_; }
   size_t gcTriggerBytes() const { return gcTriggerBytes_; }
-  double eagerAllocTrigger(bool highFrequencyGC) const;
+  float eagerAllocTrigger(bool highFrequencyGC) const;
 
   void updateAfterGC(size_t lastBytes, JSGCInvocationKind gckind,
                      const GCSchedulingTunables& tunables,
@@ -568,13 +651,82 @@ class ZoneHeapThreshold {
   void updateForRemovedArena(const GCSchedulingTunables& tunables);
 
  private:
-  static double computeZoneHeapGrowthFactorForHeapSize(
+  static float computeZoneHeapGrowthFactorForHeapSize(
       size_t lastBytes, const GCSchedulingTunables& tunables,
       const GCSchedulingState& state);
-  static size_t computeZoneTriggerBytes(double growthFactor, size_t lastBytes,
+  static size_t computeZoneTriggerBytes(float growthFactor, size_t lastBytes,
                                         JSGCInvocationKind gckind,
                                         const GCSchedulingTunables& tunables,
                                         const AutoLockGC& lock);
+};
+
+// Counts memory associated with GC things in a zone.
+//
+// In debug builds, this records details of the cell the memory allocations is
+// associated with to check the correctness of the information provided. In opt
+// builds it's just a counter.
+class MemoryTracker {
+ public:
+#ifdef DEBUG
+  MemoryTracker();
+  ~MemoryTracker();
+  void fixupAfterMovingGC();
+#endif
+
+  void addMemory(Cell* cell, size_t nbytes, MemoryUse use) {
+    MOZ_ASSERT(cell);
+    MOZ_ASSERT(nbytes);
+    mozilla::DebugOnly<size_t> initialBytes(bytes_);
+    MOZ_ASSERT(initialBytes + nbytes > initialBytes);
+
+    bytes_ += nbytes;
+
+#ifdef DEBUG
+    trackMemory(cell, nbytes, use);
+#endif
+  }
+  void removeMemory(Cell* cell, size_t nbytes, MemoryUse use) {
+    MOZ_ASSERT(cell);
+    MOZ_ASSERT(nbytes);
+    MOZ_ASSERT(bytes_ >= nbytes);
+
+    bytes_ -= nbytes;
+
+#ifdef DEBUG
+    untrackMemory(cell, nbytes, use);
+#endif
+  }
+
+  size_t bytes() const { return bytes_; }
+
+  void adopt(MemoryTracker& other);
+
+ private:
+  mozilla::Atomic<size_t, mozilla::Relaxed,
+                  mozilla::recordreplay::Behavior::DontPreserve>
+      bytes_;
+
+#ifdef DEBUG
+  void trackMemory(Cell* cell, size_t nbytes, MemoryUse use);
+  void untrackMemory(Cell* cell, size_t nbytes, MemoryUse use);
+
+  struct Key {
+    Cell* cell;
+    MemoryUse use;
+  };
+
+  struct Hasher {
+    using Lookup = Key;
+    static HashNumber hash(const Lookup& l);
+    static bool match(const Key& key, const Lookup& l);
+    static void rekey(Key& k, const Key& newKey);
+  };
+
+  Mutex mutex;
+
+  using Map = HashMap<Key, size_t, Hasher, SystemAllocPolicy>;
+  Map map;
+#endif
 };
 
 }  // namespace gc

@@ -1,5 +1,5 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
- * vim: set ts=8 sts=4 et sw=4 tw=99:
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+ * vim: set ts=8 sts=2 et sw=2 tw=80:
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -9,6 +9,7 @@
 #include "jit/BaselineJIT.h"
 #include "jit/Ion.h"
 #include "jit/JitCommon.h"
+#include "jit/JitRealm.h"
 #include "vm/Interpreter.h"
 
 #include "vm/Stack-inl.h"
@@ -16,12 +17,19 @@
 using namespace js;
 using namespace js::jit;
 
-static EnterJitStatus EnterJit(JSContext* cx, RunState& state, uint8_t* code) {
-  MOZ_ASSERT(state.script()->hasBaselineScript());
+static EnterJitStatus JS_HAZ_JSNATIVE_CALLER EnterJit(JSContext* cx,
+                                                      RunState& state,
+                                                      uint8_t* code) {
+  // We don't want to call the interpreter stub here (because
+  // C++ -> interpreterStub -> C++ is slower than staying in C++).
   MOZ_ASSERT(code);
+  MOZ_ASSERT(code != cx->runtime()->jitRuntime()->interpreterStub().value);
+
   MOZ_ASSERT(IsBaselineEnabled(cx));
 
-  if (!CheckRecursionLimit(cx)) return EnterJitStatus::Error;
+  if (!CheckRecursionLimit(cx)) {
+    return EnterJitStatus::Error;
+  }
 
 #ifdef DEBUG
   // Assert we don't GC before entering JIT code. A GC could discard JIT code
@@ -47,9 +55,14 @@ static EnterJitStatus EnterJit(JSContext* cx, RunState& state, uint8_t* code) {
     if (TooManyActualArguments(numActualArgs)) {
       // Too many arguments for Ion. Baseline supports more actual
       // arguments, so in that case force Baseline code.
-      if (numActualArgs > BASELINE_MAX_ARGS_LENGTH)
+      if (numActualArgs > BASELINE_MAX_ARGS_LENGTH) {
         return EnterJitStatus::NotEntered;
-      code = script->baselineScript()->method()->raw();
+      }
+      if (script->hasBaselineScript()) {
+        code = script->baselineScript()->method()->raw();
+      } else {
+        code = cx->runtime()->jitRuntime()->baselineInterpreter().codeRaw();
+      }
     }
 
     constructing = state.asInvoke()->constructing();
@@ -59,8 +72,9 @@ static EnterJitStatus EnterJit(JSContext* cx, RunState& state, uint8_t* code) {
     calleeToken = CalleeToToken(&args.callee().as<JSFunction>(), constructing);
 
     unsigned numFormals = script->functionNonDelazifying()->nargs();
-    if (numFormals > numActualArgs)
+    if (numFormals > numActualArgs) {
       code = cx->runtime()->jitRuntime()->getArgumentsRectifier().value;
+    }
   } else {
     numActualArgs = 0;
     constructing = false;
@@ -85,7 +99,7 @@ static EnterJitStatus EnterJit(JSContext* cx, RunState& state, uint8_t* code) {
 
   RootedValue result(cx, Int32Value(numActualArgs));
   {
-    AssertCompartmentUnchanged pcc(cx);
+    AssertRealmUnchanged aru(cx);
     ActivationEntryMonitor entryMonitor(cx, calleeToken);
     JitActivation activation(cx);
     EnterJitCode enter = cx->runtime()->jitRuntime()->enterJit();
@@ -124,15 +138,26 @@ EnterJitStatus js::jit::MaybeEnterJit(JSContext* cx, RunState& state) {
 
   uint8_t* code = script->jitCodeRaw();
   do {
-    // Make sure we have a BaselineScript: we don't want to call the
-    // interpreter stub here. Note that Baseline code contains warm-up
-    // checks in the prologue to Ion-compile if needed.
-    if (script->hasBaselineScript()) break;
+    // Make sure we can enter Baseline Interpreter or JIT code. Note that
+    // the prologue has warm-up checks to tier up if needed.
+    if (JitOptions.baselineInterpreter) {
+      if (script->types()) {
+        break;
+      }
+    } else {
+      if (script->hasBaselineScript()) {
+        break;
+      }
+    }
+
+    script->incWarmUpCounter();
 
     // Try to Ion-compile.
     if (jit::IsIonEnabled(cx)) {
       jit::MethodStatus status = jit::CanEnterIon(cx, state);
-      if (status == jit::Method_Error) return EnterJitStatus::Error;
+      if (status == jit::Method_Error) {
+        return EnterJitStatus::Error;
+      }
       if (status == jit::Method_Compiled) {
         code = script->jitCodeRaw();
         break;
@@ -141,11 +166,26 @@ EnterJitStatus js::jit::MaybeEnterJit(JSContext* cx, RunState& state) {
 
     // Try to Baseline-compile.
     if (jit::IsBaselineEnabled(cx)) {
-      jit::MethodStatus status = jit::CanEnterBaselineMethod(cx, state);
-      if (status == jit::Method_Error) return EnterJitStatus::Error;
+      jit::MethodStatus status =
+          jit::CanEnterBaselineMethod<BaselineTier::Compiler>(cx, state);
+      if (status == jit::Method_Error) {
+        return EnterJitStatus::Error;
+      }
       if (status == jit::Method_Compiled) {
         code = script->jitCodeRaw();
         break;
+      }
+
+      if (JitOptions.baselineInterpreter) {
+        jit::MethodStatus status =
+            jit::CanEnterBaselineMethod<BaselineTier::Interpreter>(cx, state);
+        if (status == jit::Method_Error) {
+          return EnterJitStatus::Error;
+        }
+        if (status == jit::Method_Compiled) {
+          code = script->jitCodeRaw();
+          break;
+        }
       }
     }
 

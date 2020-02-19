@@ -1,5 +1,5 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
- * vim: set ts=8 sts=4 et sw=4 tw=99:
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+ * vim: set ts=8 sts=2 et sw=2 tw=80:
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -13,8 +13,6 @@
 #include "jit/JitFrames.h"
 #include "jit/MoveResolver.h"
 #include "vm/BytecodeUtil.h"
-
-using mozilla::DebugOnly;
 
 namespace js {
 namespace jit {
@@ -79,8 +77,9 @@ class MacroAssemblerARM : public Assembler {
 
   Address ToPayloadAfterStackPush(const Address& base) const {
     // If we are based on StackPointer, pass over the type tag just pushed.
-    if (base.base == StackPointer)
+    if (base.base == StackPointer) {
       return Address(base.base, base.offset + sizeof(void*));
+    }
     return ToPayload(base);
   }
 
@@ -376,13 +375,13 @@ class MacroAssemblerARM : public Assembler {
                 Condition cc = Always);
   void ma_ldrsb(EDtrAddr addr, Register rt, Index mode = Offset,
                 Condition cc = Always);
-  void ma_ldrd(EDtrAddr addr, Register rt, DebugOnly<Register> rt2,
+  void ma_ldrd(EDtrAddr addr, Register rt, mozilla::DebugOnly<Register> rt2,
                Index mode = Offset, Condition cc = Always);
   void ma_strb(Register rt, DTRAddr addr, Index mode = Offset,
                Condition cc = Always);
   void ma_strh(Register rt, EDtrAddr addr, Index mode = Offset,
                Condition cc = Always);
-  void ma_strd(Register rt, DebugOnly<Register> rt2, EDtrAddr addr,
+  void ma_strd(Register rt, mozilla::DebugOnly<Register> rt2, EDtrAddr addr,
                Index mode = Offset, Condition cc = Always);
 
   // Specialty for moving N bits of data, where n == 8,16,32,64.
@@ -415,7 +414,6 @@ class MacroAssemblerARM : public Assembler {
 
   // Branches when done from within arm-specific code.
   BufferOffset ma_b(Label* dest, Condition c = Always);
-  BufferOffset ma_b(wasm::OldTrapDesc target, Condition c = Always);
   void ma_b(void* target, Condition c = Always);
   void ma_bx(Register dest, Condition c = Always);
 
@@ -570,14 +568,20 @@ class MacroAssemblerARM : public Assembler {
   // - all three registers must be different.
   // - tmp and dest will get clobbered, ptr will remain intact.
   // - byteSize can be up to 4 bytes and no more (GPR are 32 bits on ARM).
-  void emitUnalignedLoad(bool isSigned, unsigned byteSize, Register ptr,
-                         Register tmp, Register dest, unsigned offset = 0);
+  // - offset can be 0 or 4
+  // If `access` is not null then emit the appropriate access metadata.
+  void emitUnalignedLoad(const wasm::MemoryAccessDesc* access, bool isSigned,
+                         unsigned byteSize, Register ptr, Register tmp,
+                         Register dest, unsigned offset = 0);
 
   // Ditto, for a store. Note stores don't care about signedness.
   // - the two registers must be different.
   // - val will get clobbered, ptr will remain intact.
   // - byteSize can be up to 4 bytes and no more (GPR are 32 bits on ARM).
-  void emitUnalignedStore(unsigned byteSize, Register ptr, Register val,
+  // - offset can be 0 or 4
+  // If `access` is not null then emit the appropriate access metadata.
+  void emitUnalignedStore(const wasm::MemoryAccessDesc* access,
+                          unsigned byteSize, Register ptr, Register val,
                           unsigned offset = 0);
 
   // Implementation for transferMultipleByRuns so we can use different
@@ -601,7 +605,9 @@ class MacroAssemblerARM : public Assembler {
       int32_t reg = (*iter).code();
       do {
         offset += delta;
-        if ((*iter).isDouble()) offset += delta;
+        if ((*iter).isDouble()) {
+          offset += delta;
+        }
         transferFloatReg(*iter);
       } while ((++iter).more() && int32_t((*iter).code()) == (reg += sign));
       finishFloatTransfer();
@@ -635,7 +641,7 @@ class MacroAssemblerARMCompat : public MacroAssemblerARM {
 
   void branch(JitCode* c) {
     BufferOffset bo = m_buffer.nextOffset();
-    addPendingJump(bo, ImmPtr(c->raw()), Relocation::JITCODE);
+    addPendingJump(bo, ImmPtr(c->raw()), RelocationKind::JITCODE);
     ScratchRegisterScope scratch(asMasm());
     ma_movPatchable(ImmPtr(c->raw()), scratch, Always);
     ma_bx(scratch);
@@ -733,7 +739,6 @@ class MacroAssemblerARMCompat : public MacroAssemblerARM {
     ma_ldr(addr, scratch, scratch2);
     ma_bx(scratch);
   }
-  void jump(wasm::OldTrapDesc target) { as_b(target); }
 
   void negl(Register reg) { ma_neg(reg, reg, SetCC); }
   void test32(Register lhs, Register rhs) { ma_tst(lhs, rhs); }
@@ -761,6 +766,7 @@ class MacroAssemblerARMCompat : public MacroAssemblerARM {
   Condition testUndefined(Condition cond, const ValueOperand& value);
   Condition testString(Condition cond, const ValueOperand& value);
   Condition testSymbol(Condition cond, const ValueOperand& value);
+  Condition testBigInt(Condition cond, const ValueOperand& value);
   Condition testObject(Condition cond, const ValueOperand& value);
   Condition testNumber(Condition cond, const ValueOperand& value);
   Condition testMagic(Condition cond, const ValueOperand& value);
@@ -774,6 +780,7 @@ class MacroAssemblerARMCompat : public MacroAssemblerARM {
   Condition testUndefined(Condition cond, Register tag);
   Condition testString(Condition cond, Register tag);
   Condition testSymbol(Condition cond, Register tag);
+  Condition testBigInt(Condition cond, Register tag);
   Condition testObject(Condition cond, Register tag);
   Condition testDouble(Condition cond, Register tag);
   Condition testNumber(Condition cond, Register tag);
@@ -789,6 +796,7 @@ class MacroAssemblerARMCompat : public MacroAssemblerARM {
   Condition testUndefined(Condition cond, const Address& address);
   Condition testString(Condition cond, const Address& address);
   Condition testSymbol(Condition cond, const Address& address);
+  Condition testBigInt(Condition cond, const Address& address);
   Condition testObject(Condition cond, const Address& address);
   Condition testNumber(Condition cond, const Address& address);
 
@@ -797,6 +805,7 @@ class MacroAssemblerARMCompat : public MacroAssemblerARM {
   Condition testBoolean(Condition cond, const BaseIndex& src);
   Condition testString(Condition cond, const BaseIndex& src);
   Condition testSymbol(Condition cond, const BaseIndex& src);
+  Condition testBigInt(Condition cond, const BaseIndex& src);
   Condition testInt32(Condition cond, const BaseIndex& src);
   Condition testObject(Condition cond, const BaseIndex& src);
   Condition testDouble(Condition cond, const BaseIndex& src);
@@ -832,6 +841,12 @@ class MacroAssemblerARMCompat : public MacroAssemblerARM {
   void unboxSymbol(const Address& src, Register dest) {
     unboxNonDouble(src, dest, JSVAL_TYPE_SYMBOL);
   }
+  void unboxBigInt(const ValueOperand& src, Register dest) {
+    unboxNonDouble(src, dest, JSVAL_TYPE_BIGINT);
+  }
+  void unboxBigInt(const Address& src, Register dest) {
+    unboxNonDouble(src, dest, JSVAL_TYPE_BIGINT);
+  }
   void unboxObject(const ValueOperand& src, Register dest) {
     unboxNonDouble(src, dest, JSVAL_TYPE_OBJECT);
   }
@@ -862,28 +877,29 @@ class MacroAssemblerARMCompat : public MacroAssemblerARM {
   // Extended unboxing API. If the payload is already in a register, returns
   // that register. Otherwise, provides a move to the given scratch register,
   // and returns that.
-  Register extractObject(const Address& address, Register scratch);
-  Register extractObject(const ValueOperand& value, Register scratch) {
+  MOZ_MUST_USE Register extractObject(const Address& address, Register scratch);
+  MOZ_MUST_USE Register extractObject(const ValueOperand& value,
+                                      Register scratch) {
     unboxNonDouble(value, value.payloadReg(), JSVAL_TYPE_OBJECT);
     return value.payloadReg();
   }
-  Register extractString(const ValueOperand& value, Register scratch) {
-    unboxNonDouble(value, value.payloadReg(), JSVAL_TYPE_STRING);
-    return value.payloadReg();
-  }
-  Register extractSymbol(const ValueOperand& value, Register scratch) {
+  MOZ_MUST_USE Register extractSymbol(const ValueOperand& value,
+                                      Register scratch) {
     unboxNonDouble(value, value.payloadReg(), JSVAL_TYPE_SYMBOL);
     return value.payloadReg();
   }
-  Register extractInt32(const ValueOperand& value, Register scratch) {
+  MOZ_MUST_USE Register extractInt32(const ValueOperand& value,
+                                     Register scratch) {
     return value.payloadReg();
   }
-  Register extractBoolean(const ValueOperand& value, Register scratch) {
+  MOZ_MUST_USE Register extractBoolean(const ValueOperand& value,
+                                       Register scratch) {
     return value.payloadReg();
   }
-  Register extractTag(const Address& address, Register scratch);
-  Register extractTag(const BaseIndex& address, Register scratch);
-  Register extractTag(const ValueOperand& value, Register scratch) {
+  MOZ_MUST_USE Register extractTag(const Address& address, Register scratch);
+  MOZ_MUST_USE Register extractTag(const BaseIndex& address, Register scratch);
+  MOZ_MUST_USE Register extractTag(const ValueOperand& value,
+                                   Register scratch) {
     return value.typeReg();
   }
 
@@ -899,16 +915,13 @@ class MacroAssemblerARMCompat : public MacroAssemblerARM {
   Condition testBooleanTruthy(bool truthy, const ValueOperand& operand);
   Condition testDoubleTruthy(bool truthy, FloatRegister reg);
   Condition testStringTruthy(bool truthy, const ValueOperand& value);
+  Condition testBigIntTruthy(bool truthy, const ValueOperand& value);
 
   void boolValueToFloat32(const ValueOperand& operand, FloatRegister dest);
   void int32ValueToFloat32(const ValueOperand& operand, FloatRegister dest);
   void loadConstantFloat32(float f, FloatRegister dest);
 
-  CodeOffsetJump jumpWithPatch(RepatchLabel* label, Condition cond = Always,
-                               Label* documentation = nullptr);
-  CodeOffsetJump backedgeJump(RepatchLabel* label, Label* documentation) {
-    return jumpWithPatch(label, Always, documentation);
-  }
+  CodeOffsetJump jumpWithPatch(RepatchLabel* label);
 
   void loadUnboxedValue(Address address, MIRType type, AnyRegister dest) {
     if (dest.isFloat()) {
@@ -920,10 +933,11 @@ class MacroAssemblerARMCompat : public MacroAssemblerARM {
   }
 
   void loadUnboxedValue(BaseIndex address, MIRType type, AnyRegister dest) {
-    if (dest.isFloat())
+    if (dest.isFloat()) {
       loadInt32OrDouble(address.base, address.index, dest.fpu(), address.scale);
-    else
+    } else {
       load32(address, dest.gpr());
+    }
   }
 
   template <typename T>
@@ -953,10 +967,11 @@ class MacroAssemblerARMCompat : public MacroAssemblerARM {
     ma_alu(dest.base, lsl(dest.index, dest.scale), scratch, OpAdd);
 
     // Store the payload.
-    if (payloadoffset < 4096 && payloadoffset > -4096)
+    if (payloadoffset < 4096 && payloadoffset > -4096) {
       ma_str(reg, DTRAddr(scratch, DtrOffImm(payloadoffset)));
-    else
+    } else {
       ma_str(reg, Address(scratch, payloadoffset), scratch2);
+    }
 
     // Store the type.
     if (typeoffset < 4096 && typeoffset > -4096) {
@@ -986,10 +1001,11 @@ class MacroAssemblerARMCompat : public MacroAssemblerARM {
 
     ma_mov(Imm32(val.toNunboxTag()), scratch);
     ma_str(scratch, ToType(dest), scratch2);
-    if (val.isGCThing())
+    if (val.isGCThing()) {
       ma_mov(ImmGCPtr(val.toGCThing()), scratch);
-    else
+    } else {
       ma_mov(Imm32(val.toNunboxPayload()), scratch);
+    }
     ma_str(scratch, ToPayload(dest), scratch2);
   }
   void storeValue(const Value& val, BaseIndex dest) {
@@ -1015,17 +1031,19 @@ class MacroAssemblerARMCompat : public MacroAssemblerARM {
 
     // Store the payload, marking if necessary.
     if (payloadoffset < 4096 && payloadoffset > -4096) {
-      if (val.isGCThing())
+      if (val.isGCThing()) {
         ma_mov(ImmGCPtr(val.toGCThing()), scratch2);
-      else
+      } else {
         ma_mov(Imm32(val.toNunboxPayload()), scratch2);
+      }
       ma_str(scratch2, DTRAddr(scratch, DtrOffImm(payloadoffset)));
     } else {
       ma_add(Imm32(payloadoffset), scratch, scratch2);
-      if (val.isGCThing())
+      if (val.isGCThing()) {
         ma_mov(ImmGCPtr(val.toGCThing()), scratch2);
-      else
+      } else {
         ma_mov(Imm32(val.toNunboxPayload()), scratch2);
+      }
       ma_str(scratch2, DTRAddr(scratch, DtrOffImm(0)));
     }
   }
@@ -1042,16 +1060,22 @@ class MacroAssemblerARMCompat : public MacroAssemblerARM {
     loadValue(dest.toAddress(), val);
   }
   void loadValue(const BaseIndex& addr, ValueOperand val);
+
+  // Like loadValue but guaranteed to not use LDRD or LDM instructions (these
+  // don't support unaligned accesses).
+  void loadUnalignedValue(const Address& src, ValueOperand dest);
+
   void tagValue(JSValueType type, Register payload, ValueOperand dest);
 
   void pushValue(ValueOperand val);
   void popValue(ValueOperand val);
   void pushValue(const Value& val) {
     push(Imm32(val.toNunboxTag()));
-    if (val.isGCThing())
+    if (val.isGCThing()) {
       push(ImmGCPtr(val.toGCThing()));
-    else
+    } else {
       push(Imm32(val.toNunboxPayload()));
+    }
   }
   void pushValue(JSValueType type, Register reg) {
     push(ImmTag(JSVAL_TYPE_TO_TAG(type)));
@@ -1110,97 +1134,6 @@ class MacroAssemblerARMCompat : public MacroAssemblerARM {
 
   void loadPrivate(const Address& address, Register dest);
 
-  void loadInt32x1(const Address& addr, FloatRegister dest) {
-    MOZ_CRASH("NYI");
-  }
-  void loadInt32x1(const BaseIndex& addr, FloatRegister dest) {
-    MOZ_CRASH("NYI");
-  }
-  void loadInt32x2(const Address& addr, FloatRegister dest) {
-    MOZ_CRASH("NYI");
-  }
-  void loadInt32x2(const BaseIndex& addr, FloatRegister dest) {
-    MOZ_CRASH("NYI");
-  }
-  void loadInt32x3(const Address& src, FloatRegister dest) { MOZ_CRASH("NYI"); }
-  void loadInt32x3(const BaseIndex& src, FloatRegister dest) {
-    MOZ_CRASH("NYI");
-  }
-  void loadInt32x4(const Address& addr, FloatRegister dest) {
-    MOZ_CRASH("NYI");
-  }
-  void storeInt32x1(FloatRegister src, const Address& dest) {
-    MOZ_CRASH("NYI");
-  }
-  void storeInt32x1(FloatRegister src, const BaseIndex& dest) {
-    MOZ_CRASH("NYI");
-  }
-  void storeInt32x2(FloatRegister src, const Address& dest) {
-    MOZ_CRASH("NYI");
-  }
-  void storeInt32x2(FloatRegister src, const BaseIndex& dest) {
-    MOZ_CRASH("NYI");
-  }
-  void storeInt32x3(FloatRegister src, const Address& dest) {
-    MOZ_CRASH("NYI");
-  }
-  void storeInt32x3(FloatRegister src, const BaseIndex& dest) {
-    MOZ_CRASH("NYI");
-  }
-  void storeInt32x4(FloatRegister src, const Address& addr) {
-    MOZ_CRASH("NYI");
-  }
-  void loadAlignedSimd128Int(const Address& addr, FloatRegister dest) {
-    MOZ_CRASH("NYI");
-  }
-  void storeAlignedSimd128Int(FloatRegister src, Address addr) {
-    MOZ_CRASH("NYI");
-  }
-  void loadUnalignedSimd128Int(const Address& addr, FloatRegister dest) {
-    MOZ_CRASH("NYI");
-  }
-  void loadUnalignedSimd128Int(const BaseIndex& addr, FloatRegister dest) {
-    MOZ_CRASH("NYI");
-  }
-  void storeUnalignedSimd128Int(FloatRegister src, Address addr) {
-    MOZ_CRASH("NYI");
-  }
-  void storeUnalignedSimd128Int(FloatRegister src, BaseIndex addr) {
-    MOZ_CRASH("NYI");
-  }
-
-  void loadFloat32x3(const Address& src, FloatRegister dest) {
-    MOZ_CRASH("NYI");
-  }
-  void loadFloat32x3(const BaseIndex& src, FloatRegister dest) {
-    MOZ_CRASH("NYI");
-  }
-  void loadFloat32x4(const Address& addr, FloatRegister dest) {
-    MOZ_CRASH("NYI");
-  }
-  void storeFloat32x4(FloatRegister src, const Address& addr) {
-    MOZ_CRASH("NYI");
-  }
-
-  void loadAlignedSimd128Float(const Address& addr, FloatRegister dest) {
-    MOZ_CRASH("NYI");
-  }
-  void storeAlignedSimd128Float(FloatRegister src, Address addr) {
-    MOZ_CRASH("NYI");
-  }
-  void loadUnalignedSimd128Float(const Address& addr, FloatRegister dest) {
-    MOZ_CRASH("NYI");
-  }
-  void loadUnalignedSimd128Float(const BaseIndex& addr, FloatRegister dest) {
-    MOZ_CRASH("NYI");
-  }
-  void storeUnalignedSimd128Float(FloatRegister src, Address addr) {
-    MOZ_CRASH("NYI");
-  }
-  void storeUnalignedSimd128Float(FloatRegister src, BaseIndex addr) {
-    MOZ_CRASH("NYI");
-  }
-
   void loadDouble(const Address& addr, FloatRegister dest);
   void loadDouble(const BaseIndex& src, FloatRegister dest);
 
@@ -1256,8 +1189,8 @@ class MacroAssemblerARMCompat : public MacroAssemblerARM {
 
   void cmp32(Register lhs, Imm32 rhs);
   void cmp32(Register lhs, Register rhs);
-  void cmp32(const Address& lhs, Imm32 rhs) { MOZ_CRASH("NYI"); }
-  void cmp32(const Address& lhs, Register rhs) { MOZ_CRASH("NYI"); }
+  void cmp32(const Address& lhs, Imm32 rhs);
+  void cmp32(const Address& lhs, Register rhs);
 
   void cmpPtr(Register lhs, Register rhs);
   void cmpPtr(Register lhs, ImmWord rhs);
@@ -1334,8 +1267,9 @@ class MacroAssemblerARMCompat : public MacroAssemblerARM {
     ScratchRegisterScope scratch(asMasm());
     ma_alu(address.base, lsl(address.index, address.scale), dest, OpAdd,
            LeaveCC);
-    if (address.offset)
+    if (address.offset) {
       ma_add(dest, Imm32(address.offset), dest, scratch, LeaveCC);
+    }
   }
   void floor(FloatRegister input, Register output, Label* handleNotAnInt);
   void floorf(FloatRegister input, Register output, Label* handleNotAnInt);
@@ -1345,6 +1279,8 @@ class MacroAssemblerARMCompat : public MacroAssemblerARM {
              FloatRegister tmp);
   void roundf(FloatRegister input, Register output, Label* handleNotAnInt,
               FloatRegister tmp);
+  void trunc(FloatRegister input, Register output, Label* handleNotAnInt);
+  void truncf(FloatRegister input, Register output, Label* handleNotAnInt);
 
   void clampCheck(Register r, Label* handleNotAnInt) {
     // Check explicitly for r == INT_MIN || r == INT_MAX

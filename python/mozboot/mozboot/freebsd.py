@@ -18,10 +18,9 @@ class FreeBSDBootstrapper(BaseBootstrapper):
             'autoconf213',
             'gmake',
             'gtar',
-            'mercurial',
-            'npm',
             'pkgconf',
             'py%s%s-sqlite3' % sys.version_info[0:2],
+            'python3',
             'rust',
             'watchman',
             'zip',
@@ -34,6 +33,7 @@ class FreeBSDBootstrapper(BaseBootstrapper):
             'gtk3',
             'libXt',
             'mesa-dri',  # depends on llvm*
+            'nasm',
             'pulseaudio',
             'v4l_compat',
             'yasm',
@@ -66,9 +66,20 @@ class FreeBSDBootstrapper(BaseBootstrapper):
         # TODO: Figure out what not to install for artifact mode
         self.pkg_install(*self.browser_packages)
 
-    def ensure_stylo_packages(self, state_dir, checkout_root):
-        # Already installed as browser package
+    def ensure_clang_static_analysis_package(self, state_dir, checkout_root):
+        # TODO: we don't ship clang base static analysis for this platform
         pass
+
+    def ensure_stylo_packages(self, state_dir, checkout_root):
+        # Clang / llvm already installed as browser package
+        self.pkg_install('rust-cbindgen')
+
+    def ensure_nasm_packages(self, state_dir, checkout_root):
+        # installed via ensure_browser_packages
+        pass
+
+    def ensure_node_packages(self, state_dir, checkout_root):
+        self.pkg_install('npm')
 
     def upgrade_mercurial(self, current):
         self.pkg_install('mercurial')

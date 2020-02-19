@@ -14,12 +14,16 @@ info: |
 features: [string-trimming, String.prototype.trimStart]
 ---*/
 
+assert.sameValue(typeof String.prototype.trimStart, "function");
+
 var trimStart = String.prototype.trimStart;
 var symbol = Symbol();
 
 assert.throws(
   TypeError,
-  function() { trimStart.call(symbol); },
+  function() {
+    trimStart.call(symbol);
+  },
   'String.prototype.trimStart.call(Symbol())'
 );
 

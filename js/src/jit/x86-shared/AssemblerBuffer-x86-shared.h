@@ -1,5 +1,5 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
- * vim: set ts=8 sts=4 et sw=4 tw=99:
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+ * vim: set ts=8 sts=2 et sw=2 tw=80:
  *
  * ***** BEGIN LICENSE BLOCK *****
  * Copyright (C) 2008 Apple Inc. All rights reserved.
@@ -34,10 +34,13 @@
 #include <string.h>
 
 #include "jit/ExecutableAllocator.h"
+#include "jit/Ion.h"
 #include "jit/JitSpewer.h"
 
 // Spew formatting helpers.
-#define PRETTYHEX(x) (((x) < 0) ? "-" : ""), (((x) < 0) ? -(x) : (x))
+#define PRETTYHEX(x)      \
+  (((x) < 0) ? "-" : ""), \
+      ((unsigned)((x) ^ ((x) >> 31)) + ((unsigned)(x) >> 31))
 
 #define MEM_o "%s0x%x"
 #define MEM_os MEM_o "(,%s,%d)"
@@ -85,7 +88,9 @@ class AssemblerBufferAllocPolicy : private SystemAllocPolicy {
         sizeof(T) == 1,
         "AssemblerBufferAllocPolicy should only be used with byte vectors");
     MOZ_ASSERT(oldSize <= MaxCodeBytesPerProcess);
-    if (MOZ_UNLIKELY(newSize > MaxCodeBytesPerProcess)) return nullptr;
+    if (MOZ_UNLIKELY(newSize > MaxCodeBytesPerProcess)) {
+      return nullptr;
+    }
     return SystemAllocPolicy::pod_realloc<T>(p, oldSize, newSize);
   }
   template <typename T>
@@ -93,7 +98,9 @@ class AssemblerBufferAllocPolicy : private SystemAllocPolicy {
     static_assert(
         sizeof(T) == 1,
         "AssemblerBufferAllocPolicy should only be used with byte vectors");
-    if (MOZ_UNLIKELY(numElems > MaxCodeBytesPerProcess)) return nullptr;
+    if (MOZ_UNLIKELY(numElems > MaxCodeBytesPerProcess)) {
+      return nullptr;
+    }
     return SystemAllocPolicy::pod_malloc<T>(numElems);
   }
 };
@@ -107,8 +114,9 @@ class AssemblerBuffer {
   template <size_t size, typename T>
   MOZ_ALWAYS_INLINE void sizedAppend(T value) {
     if (MOZ_UNLIKELY(
-            !m_buffer.append(reinterpret_cast<unsigned char*>(&value), size)))
+            !m_buffer.append(reinterpret_cast<unsigned char*>(&value), size))) {
       oomDetected();
+    }
   }
 
  public:
@@ -118,8 +126,9 @@ class AssemblerBuffer {
     // This should only be called with small |space| values to ensure
     // we don't overflow below.
     MOZ_ASSERT(space <= 16);
-    if (MOZ_UNLIKELY(!m_buffer.reserve(m_buffer.length() + space)))
+    if (MOZ_UNLIKELY(!m_buffer.reserve(m_buffer.length() + space))) {
       oomDetected();
+    }
   }
 
   bool isAligned(size_t alignment) const {
@@ -185,6 +194,12 @@ class AssemblerBuffer {
   void oomDetected() {
     m_oom = true;
     m_buffer.clear();
+#ifdef DEBUG
+    JitContext* context = MaybeGetJitContext();
+    if (context) {
+      context->setOOM();
+    }
+#endif
   }
 
   mozilla::Vector<unsigned char, 256, AssemblerBufferAllocPolicy> m_buffer;

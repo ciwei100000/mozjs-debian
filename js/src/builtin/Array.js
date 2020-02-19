@@ -23,10 +23,10 @@ function ArrayIndexOf(searchElement/*, fromIndex*/) {
 
     var k;
     /* Step 7. */
-    if (n >= 0)
+    if (n >= 0) {
         k = n;
     /* Step 8. */
-    else {
+    } else {
         /* Step a. */
         k = len + n;
         /* Step b. */
@@ -45,6 +45,7 @@ function ArrayIndexOf(searchElement/*, fromIndex*/) {
 }
 
 function ArrayStaticIndexOf(list, searchElement/*, fromIndex*/) {
+    WarnDeprecatedArrayMethod(ARRAY_GENERICS_INDEXOF, "indexOf");
     if (arguments.length < 1)
         ThrowTypeError(JSMSG_MISSING_FUN_ARG, 0, "Array.indexOf");
     var fromIndex = arguments.length > 2 ? arguments[2] : 0;
@@ -86,6 +87,7 @@ function ArrayLastIndexOf(searchElement/*, fromIndex*/) {
 }
 
 function ArrayStaticLastIndexOf(list, searchElement/*, fromIndex*/) {
+    WarnDeprecatedArrayMethod(ARRAY_GENERICS_LASTINDEXOF, "lastIndexOf");
     if (arguments.length < 1)
         ThrowTypeError(JSMSG_MISSING_FUN_ARG, 0, "Array.lastIndexOf");
     var fromIndex;
@@ -132,6 +134,7 @@ function ArrayEvery(callbackfn/*, thisArg*/) {
 }
 
 function ArrayStaticEvery(list, callbackfn/*, thisArg*/) {
+    WarnDeprecatedArrayMethod(ARRAY_GENERICS_EVERY, "every");
     if (arguments.length < 2)
         ThrowTypeError(JSMSG_MISSING_FUN_ARG, 0, "Array.every");
     if (!IsCallable(callbackfn))
@@ -173,6 +176,7 @@ function ArraySome(callbackfn/*, thisArg*/) {
 }
 
 function ArrayStaticSome(list, callbackfn/*, thisArg*/) {
+    WarnDeprecatedArrayMethod(ARRAY_GENERICS_SOME, "some");
     if (arguments.length < 2)
         ThrowTypeError(JSMSG_MISSING_FUN_ARG, 0, "Array.some");
     if (!IsCallable(callbackfn))
@@ -258,6 +262,7 @@ function ArrayForEach(callbackfn/*, thisArg*/) {
 }
 
 function ArrayStaticForEach(list, callbackfn/*, thisArg*/) {
+    WarnDeprecatedArrayMethod(ARRAY_GENERICS_FOREACH, "forEach");
     if (arguments.length < 2)
         ThrowTypeError(JSMSG_MISSING_FUN_ARG, 0, "Array.forEach");
     if (!IsCallable(callbackfn))
@@ -302,6 +307,7 @@ function ArrayMap(callbackfn/*, thisArg*/) {
 }
 
 function ArrayStaticMap(list, callbackfn/*, thisArg*/) {
+    WarnDeprecatedArrayMethod(ARRAY_GENERICS_MAP, "map");
     if (arguments.length < 2)
         ThrowTypeError(JSMSG_MISSING_FUN_ARG, 0, "Array.map");
     if (!IsCallable(callbackfn))
@@ -350,6 +356,7 @@ function ArrayFilter(callbackfn/*, thisArg*/) {
 }
 
 function ArrayStaticFilter(list, callbackfn/*, thisArg*/) {
+    WarnDeprecatedArrayMethod(ARRAY_GENERICS_FILTER, "filter");
     if (arguments.length < 2)
         ThrowTypeError(JSMSG_MISSING_FUN_ARG, 0, "Array.filter");
     if (!IsCallable(callbackfn))
@@ -381,23 +388,26 @@ function ArrayReduce(callbackfn/*, initialValue*/) {
         accumulator = arguments[1];
     } else {
         /* Step 5. */
+        // Add an explicit |throw| here and below to inform Ion that the
+        // ThrowTypeError calls exit this function.
         if (len === 0)
-            ThrowTypeError(JSMSG_EMPTY_ARRAY_REDUCE);
-        if (IsPackedArray(O)) {
-            accumulator = O[k++];
-        } else {
-            var kPresent = false;
-            for (; k < len; k++) {
-                if (k in O) {
-                    accumulator = O[k];
-                    kPresent = true;
-                    k++;
-                    break;
-                }
+            throw ThrowTypeError(JSMSG_EMPTY_ARRAY_REDUCE);
+
+        // Use a |do-while| loop to let Ion know that the loop will definitely
+        // be entered at least once. When Ion is then also able to inline the
+        // |in| operator, it can optimize away the whole loop.
+        var kPresent = false;
+        do {
+            if (k in O) {
+                kPresent = true;
+                break;
             }
-            if (!kPresent)
-              ThrowTypeError(JSMSG_EMPTY_ARRAY_REDUCE);
-        }
+        } while (++k < len);
+        if (!kPresent)
+          throw ThrowTypeError(JSMSG_EMPTY_ARRAY_REDUCE);
+
+        // Moved outside of the loop to ensure the assignment is non-conditional.
+        accumulator = O[k++];
     }
 
     /* Step 9. */
@@ -415,6 +425,7 @@ function ArrayReduce(callbackfn/*, initialValue*/) {
 }
 
 function ArrayStaticReduce(list, callbackfn) {
+    WarnDeprecatedArrayMethod(ARRAY_GENERICS_REDUCE, "reduce");
     if (arguments.length < 2)
         ThrowTypeError(JSMSG_MISSING_FUN_ARG, 0, "Array.reduce");
     if (!IsCallable(callbackfn))
@@ -449,23 +460,26 @@ function ArrayReduceRight(callbackfn/*, initialValue*/) {
         accumulator = arguments[1];
     } else {
         /* Step 5. */
+        // Add an explicit |throw| here and below to inform Ion that the
+        // ThrowTypeError calls exit this function.
         if (len === 0)
-            ThrowTypeError(JSMSG_EMPTY_ARRAY_REDUCE);
-        if (IsPackedArray(O)) {
-            accumulator = O[k--];
-        } else {
-            var kPresent = false;
-            for (; k >= 0; k--) {
-                if (k in O) {
-                    accumulator = O[k];
-                    kPresent = true;
-                    k--;
-                    break;
-                }
+            throw ThrowTypeError(JSMSG_EMPTY_ARRAY_REDUCE);
+
+        // Use a |do-while| loop to let Ion know that the loop will definitely
+        // be entered at least once. When Ion is then also able to inline the
+        // |in| operator, it can optimize away the whole loop.
+        var kPresent = false;
+        do {
+            if (k in O) {
+                kPresent = true;
+                break;
             }
-            if (!kPresent)
-                ThrowTypeError(JSMSG_EMPTY_ARRAY_REDUCE);
-        }
+        } while (--k >= 0);
+        if (!kPresent)
+            throw ThrowTypeError(JSMSG_EMPTY_ARRAY_REDUCE);
+
+        // Moved outside of the loop to ensure the assignment is non-conditional.
+        accumulator = O[k--];
     }
 
     /* Step 9. */
@@ -483,6 +497,7 @@ function ArrayReduceRight(callbackfn/*, initialValue*/) {
 }
 
 function ArrayStaticReduceRight(list, callbackfn) {
+    WarnDeprecatedArrayMethod(ARRAY_GENERICS_REDUCERIGHT, "reduceRight");
     if (arguments.length < 2)
         ThrowTypeError(JSMSG_MISSING_FUN_ARG, 0, "Array.reduceRight");
     if (!IsCallable(callbackfn))
@@ -774,10 +789,12 @@ function ArrayIteratorNext() {
     return result;
 }
 
-function ArrayValues() {
+// Uncloned functions with `$` prefix are allocated as extended function
+// to store the original name in `_SetCanonicalName`.
+function $ArrayValues() {
     return CreateArrayIterator(this, ITEM_KIND_VALUE);
 }
-_SetCanonicalName(ArrayValues, "values");
+_SetCanonicalName($ArrayValues, "values");
 
 function ArrayEntries() {
     return CreateArrayIterator(this, ITEM_KIND_KEY_AND_VALUE);
@@ -884,7 +901,7 @@ function MakeIteratorWrapper(items, method) {
         // we don't create an inferred name for this function at runtime.
         [std_iterator]: function IteratorMethod() {
             return callContentFunction(method, items);
-        }
+        },
     };
 }
 
@@ -958,11 +975,11 @@ function ArrayToLocaleString(locales, options) {
 }
 
 // ES 2016 draft Mar 25, 2016 22.1.2.5.
-function ArraySpecies() {
+function $ArraySpecies() {
     // Step 1.
     return this;
 }
-_SetCanonicalName(ArraySpecies, "get [Symbol.species]");
+_SetCanonicalName($ArraySpecies, "get [Symbol.species]");
 
 // ES 2016 draft Mar 25, 2016 9.4.2.3.
 function ArraySpeciesCreate(originalArray, length) {
@@ -971,6 +988,7 @@ function ArraySpeciesCreate(originalArray, length) {
     assert(length >= 0, "length should be a non-negative number");
 
     // Step 2.
+    // eslint-disable-next-line no-compare-neg-zero
     if (length === -0)
         length = 0;
 
@@ -982,7 +1000,7 @@ function ArraySpeciesCreate(originalArray, length) {
     var C = originalArray.constructor;
 
     // Step 5.b.
-    if (IsConstructor(C) && IsWrappedArrayConstructor(C))
+    if (IsConstructor(C) && IsCrossRealmArrayConstructor(C))
         return std_Array(length);
 
     // Step 5.c.
@@ -1133,8 +1151,8 @@ function ArrayFlatMap(mapperFunction/*, thisArg*/) {
 }
 
 // https://tc39.github.io/proposal-flatMap/
-// January 16, 2018
-function ArrayFlatten(/* depth */) {
+// May 23, 2018
+function ArrayFlat(/* depth */) {
      // Step 1.
     var O = ToObject(this);
 
@@ -1158,6 +1176,8 @@ function ArrayFlatten(/* depth */) {
     return A;
 }
 
+// https://tc39.github.io/proposal-flatMap/
+// May 23, 2018
 function FlattenIntoArray(target, source, sourceLen, start, depth, mapperFunction, thisArg) {
     // Step 1.
     var targetIndex = start;
@@ -1178,24 +1198,30 @@ function FlattenIntoArray(target, source, sourceLen, start, depth, mapperFunctio
             }
 
             // Step 3.c.iii.
-            var flattenable = IsArray(element);
+            var shouldFlatten = false;
 
             // Step 3.c.iv.
-            if (flattenable && depth > 0) {
+            if (depth > 0) {
                 // Step 3.c.iv.1.
+                shouldFlatten = IsArray(element);
+            }
+
+            // Step 3.c.v.
+            if (shouldFlatten) {
+                // Step 3.c.v.1.
                 var elementLen = ToLength(element.length);
 
-                // Step 3.c.iv.2.
+                // Step 3.c.v.2.
                 targetIndex = FlattenIntoArray(target, element, elementLen, targetIndex, depth - 1);
             } else {
-                // Step 3.c.v.1.
+                // Step 3.c.vi.1.
                 if (targetIndex >= MAX_NUMERIC_INDEX)
                     ThrowTypeError(JSMSG_TOO_LONG_ARRAY);
 
-                // Step 3.c.v.2.
+                // Step 3.c.vi.2.
                 _DefineDataProperty(target, targetIndex, element);
 
-                // Step 3.c.v.3.
+                // Step 3.c.vi.3.
                 targetIndex++;
             }
         }
@@ -1206,6 +1232,7 @@ function FlattenIntoArray(target, source, sourceLen, start, depth, mapperFunctio
 }
 
 function ArrayStaticConcat(arr, arg1) {
+    WarnDeprecatedArrayMethod(ARRAY_GENERICS_CONCAT, "concat");
     if (arguments.length < 1)
         ThrowTypeError(JSMSG_MISSING_FUN_ARG, 0, "Array.concat");
     var args = callFunction(std_Array_slice, arguments, 1);
@@ -1213,24 +1240,28 @@ function ArrayStaticConcat(arr, arg1) {
 }
 
 function ArrayStaticJoin(arr, separator) {
+    WarnDeprecatedArrayMethod(ARRAY_GENERICS_JOIN, "join");
     if (arguments.length < 1)
         ThrowTypeError(JSMSG_MISSING_FUN_ARG, 0, "Array.join");
     return callFunction(std_Array_join, arr, separator);
 }
 
 function ArrayStaticReverse(arr) {
+    WarnDeprecatedArrayMethod(ARRAY_GENERICS_REVERSE, "reverse");
     if (arguments.length < 1)
         ThrowTypeError(JSMSG_MISSING_FUN_ARG, 0, "Array.reverse");
     return callFunction(std_Array_reverse, arr);
 }
 
 function ArrayStaticSort(arr, comparefn) {
+    WarnDeprecatedArrayMethod(ARRAY_GENERICS_SORT, "sort");
     if (arguments.length < 1)
         ThrowTypeError(JSMSG_MISSING_FUN_ARG, 0, "Array.sort");
     return callFunction(ArraySort, arr, comparefn);
 }
 
 function ArrayStaticPush(arr, arg1) {
+    WarnDeprecatedArrayMethod(ARRAY_GENERICS_PUSH, "push");
     if (arguments.length < 1)
         ThrowTypeError(JSMSG_MISSING_FUN_ARG, 0, "Array.push");
     var args = callFunction(std_Array_slice, arguments, 1);
@@ -1238,18 +1269,21 @@ function ArrayStaticPush(arr, arg1) {
 }
 
 function ArrayStaticPop(arr) {
+    WarnDeprecatedArrayMethod(ARRAY_GENERICS_POP, "pop");
     if (arguments.length < 1)
         ThrowTypeError(JSMSG_MISSING_FUN_ARG, 0, "Array.pop");
     return callFunction(std_Array_pop, arr);
 }
 
 function ArrayStaticShift(arr) {
+    WarnDeprecatedArrayMethod(ARRAY_GENERICS_SHIFT, "shift");
     if (arguments.length < 1)
         ThrowTypeError(JSMSG_MISSING_FUN_ARG, 0, "Array.shift");
     return callFunction(std_Array_shift, arr);
 }
 
 function ArrayStaticUnshift(arr, arg1) {
+    WarnDeprecatedArrayMethod(ARRAY_GENERICS_UNSHIFT, "unshift");
     if (arguments.length < 1)
         ThrowTypeError(JSMSG_MISSING_FUN_ARG, 0, "Array.unshift");
     var args = callFunction(std_Array_slice, arguments, 1);
@@ -1257,6 +1291,7 @@ function ArrayStaticUnshift(arr, arg1) {
 }
 
 function ArrayStaticSplice(arr, start, deleteCount) {
+    WarnDeprecatedArrayMethod(ARRAY_GENERICS_SPLICE, "splice");
     if (arguments.length < 1)
         ThrowTypeError(JSMSG_MISSING_FUN_ARG, 0, "Array.splice");
     var args = callFunction(std_Array_slice, arguments, 1);
@@ -1264,6 +1299,7 @@ function ArrayStaticSplice(arr, start, deleteCount) {
 }
 
 function ArrayStaticSlice(arr, start, end) {
+    WarnDeprecatedArrayMethod(ARRAY_GENERICS_SLICE, "slice");
     if (arguments.length < 1)
         ThrowTypeError(JSMSG_MISSING_FUN_ARG, 0, "Array.slice");
     return callFunction(std_Array_slice, arr, start, end);

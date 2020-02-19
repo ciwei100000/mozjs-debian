@@ -684,6 +684,10 @@ yue{
         }
         MRO{
             "MRO",
+            "茅利塔尼亞烏吉亞 (1973–2017)",
+        }
+        MRU{
+            "MRU",
             "茅利塔尼亞烏吉亞",
         }
         MTL{
@@ -916,6 +920,10 @@ yue{
         }
         STD{
             "STD",
+            "聖多美島和普林西比島多布拉 (1977–2017)",
+        }
+        STN{
+            "STN",
             "聖多美島和普林西比島多布拉",
         }
         SUR{
@@ -1036,6 +1044,10 @@ yue{
         }
         VEF{
             "VEF",
+            "委內瑞拉玻利瓦 (VEF)",
+        }
+        VES{
+            "VES",
             "委內瑞拉玻利瓦",
         }
         VND{
@@ -1200,106 +1212,13 @@ yue{
         }
     }
     Currencies%narrow{
-        AOA{"Kz"}
-        ARS{"$"}
-        AUD{"$"}
-        BAM{"KM"}
-        BBD{"$"}
-        BDT{"৳"}
-        BMD{"$"}
-        BND{"$"}
-        BOB{"Bs"}
-        BRL{"R$"}
-        BSD{"$"}
-        BWP{"P"}
         BYN{"р."}
-        BZD{"$"}
-        CAD{"$"}
-        CLP{"$"}
-        CNY{"¥"}
-        COP{"$"}
-        CRC{"₡"}
-        CUC{"$"}
-        CUP{"$"}
-        CZK{"Kč"}
-        DKK{"kr"}
-        DOP{"$"}
-        EGP{"E£"}
         ESP{"₧"}
-        EUR{"€"}
-        FJD{"$"}
-        FKP{"£"}
-        GBP{"£"}
-        GEL{"₾"}
-        GIP{"£"}
-        GNF{"FG"}
-        GTQ{"Q"}
-        GYD{"$"}
-        HKD{"$"}
-        HNL{"L"}
-        HRK{"kn"}
-        HUF{"Ft"}
-        IDR{"Rp"}
-        ILS{"₪"}
-        INR{"₹"}
-        ISK{"kr"}
-        JMD{"$"}
-        JPY{"¥"}
-        KHR{"៛"}
-        KMF{"CF"}
-        KPW{"₩"}
-        KRW{"₩"}
-        KYD{"$"}
-        KZT{"₸"}
-        LAK{"₭"}
-        LBP{"L£"}
-        LKR{"Rs"}
-        LRD{"$"}
-        MGA{"Ar"}
-        MMK{"K"}
-        MNT{"₮"}
-        MUR{"Rs"}
-        MXN{"$"}
-        MYR{"RM"}
-        NAD{"$"}
-        NGN{"₦"}
-        NIO{"C$"}
-        NOK{"kr"}
-        NPR{"Rs"}
-        NZD{"$"}
-        PHP{"₱"}
-        PKR{"Rs"}
-        PLN{"zł"}
-        PYG{"₲"}
-        RON{"lei"}
-        RUB{"₽"}
         RUR{"р."}
-        RWF{"RF"}
-        SBD{"$"}
-        SEK{"kr"}
-        SGD{"$"}
-        SHP{"£"}
-        SRD{"$"}
-        SSP{"£"}
-        STD{"Db"}
-        SYP{"£"}
-        THB{"฿"}
-        TOP{"T$"}
-        TRY{"₺"}
-        TTD{"$"}
-        TWD{"$"}
-        UAH{"₴"}
-        USD{"$"}
-        UYU{"$"}
-        VEF{"Bs"}
-        VND{"₫"}
-        XCD{"$"}
-        ZAR{"R"}
-        ZMW{"ZK"}
+        STN{"Db"}
     }
     Currencies%variant{
         GEL{"₾"}
-        TRY{"TL"}
     }
     CurrencyPlurals{
         ADP{
@@ -1810,6 +1729,9 @@ yue{
             other{"澳門元"}
         }
         MRO{
+            other{"茅利塔尼亞烏吉亞 (1973–2017)"}
+        }
+        MRU{
             other{"茅利塔尼亞烏吉亞"}
         }
         MTL{
@@ -1984,6 +1906,9 @@ yue{
             other{"南蘇丹鎊"}
         }
         STD{
+            other{"聖多美島和普林西比島多布拉 (1977–2017)"}
+        }
+        STN{
             other{"聖多美島和普林西比島多布拉"}
         }
         SUR{
@@ -2074,6 +1999,9 @@ yue{
             other{"委內瑞拉玻利瓦 (1871–2008)"}
         }
         VEF{
+            other{"委內瑞拉玻利瓦 (VEF)"}
+        }
+        VES{
             other{"委內瑞拉玻利瓦"}
         }
         VND{
@@ -2200,5 +2128,5 @@ yue{
     CurrencyUnitPatterns{
         other{"{0} {1}"}
     }
-    Version{"2.1.37.33"}
+    Version{"2.1.49.82"}
 }

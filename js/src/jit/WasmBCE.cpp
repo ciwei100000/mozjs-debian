@@ -1,5 +1,5 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
- * vim: set ts=8 sts=4 et sw=4 tw=99:
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+ * vim: set ts=8 sts=2 et sw=2 tw=80:
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -10,7 +10,6 @@
 
 using namespace js;
 using namespace js::jit;
-using namespace mozilla;
 
 typedef js::HashMap<uint32_t, MDefinition*, DefaultHasher<uint32_t>,
                     SystemAllocPolicy>
@@ -31,7 +30,6 @@ typedef js::HashMap<uint32_t, MDefinition*, DefaultHasher<uint32_t>,
 bool jit::EliminateBoundsChecks(MIRGenerator* mir, MIRGraph& graph) {
   // Map for dominating block where a given definition was checked
   LastSeenMap lastSeen;
-  if (!lastSeen.init()) return false;
 
   for (ReversePostorderIterator bIter(graph.rpoBegin());
        bIter != graph.rpoEnd(); bIter++) {
@@ -60,23 +58,27 @@ bool jit::EliminateBoundsChecks(MIRGenerator* mir, MIRGraph& graph) {
               uint32_t(addr->toConstant()->toInt32()) <
                   mir->minWasmHeapLength()) {
             bc->setRedundant();
-            if (JitOptions.spectreIndexMasking)
+            if (JitOptions.spectreIndexMasking) {
               bc->replaceAllUsesWith(addr);
-            else
+            } else {
               MOZ_ASSERT(!bc->hasUses());
+            }
           } else {
             LastSeenMap::AddPtr ptr = lastSeen.lookupForAdd(addr->id());
             if (ptr) {
               MDefinition* prevCheckOrPhi = ptr->value();
               if (prevCheckOrPhi->block()->dominates(block)) {
                 bc->setRedundant();
-                if (JitOptions.spectreIndexMasking)
+                if (JitOptions.spectreIndexMasking) {
                   bc->replaceAllUsesWith(prevCheckOrPhi);
-                else
+                } else {
                   MOZ_ASSERT(!bc->hasUses());
+                }
               }
             } else {
-              if (!lastSeen.add(ptr, addr->id(), def)) return false;
+              if (!lastSeen.add(ptr, addr->id(), def)) {
+                return false;
+              }
             }
           }
           break;
@@ -98,8 +100,9 @@ bool jit::EliminateBoundsChecks(MIRGenerator* mir, MIRGraph& graph) {
             MDefinition* src = phi->getOperand(i);
 
             if (JitOptions.spectreIndexMasking) {
-              if (src->isWasmBoundsCheck())
+              if (src->isWasmBoundsCheck()) {
                 src = src->toWasmBoundsCheck()->index();
+              }
             } else {
               MOZ_ASSERT(!src->isWasmBoundsCheck());
             }
@@ -112,7 +115,9 @@ bool jit::EliminateBoundsChecks(MIRGenerator* mir, MIRGraph& graph) {
           }
 
           if (phiChecked) {
-            if (!lastSeen.put(def->id(), def)) return false;
+            if (!lastSeen.put(def->id(), def)) {
+              return false;
+            }
           }
 
           break;

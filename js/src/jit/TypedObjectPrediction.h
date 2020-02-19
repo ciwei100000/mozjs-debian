@@ -1,5 +1,5 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
- * vim: set ts=8 sts=4 et sw=4 tw=99:
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+ * vim: set ts=8 sts=2 et sw=2 tw=80:
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -102,14 +102,15 @@ class TypedObjectPrediction {
 
   bool hasFieldNamedPrefix(const StructTypeDescr& descr, size_t fieldCount,
                            jsid id, size_t* fieldOffset,
-                           TypedObjectPrediction* out, size_t* index) const;
+                           TypedObjectPrediction* out, size_t* index,
+                           bool* isMutable) const;
 
  public:
   ///////////////////////////////////////////////////////////////////////////
   // Constructing a prediction. Generally, you start with an empty
   // prediction and invoke addDescr() repeatedly.
 
-  TypedObjectPrediction() { kind_ = Empty; }
+  TypedObjectPrediction() : data_() { kind_ = Empty; }
 
   explicit TypedObjectPrediction(const TypeDescr& descr) { setDescr(descr); }
 
@@ -151,11 +152,10 @@ class TypedObjectPrediction {
   //////////////////////////////////////////////////////////////////////
   // Simple operations
   //
-  // Only valid when |kind()| is Scalar, Reference, or Simd (as appropriate).
+  // Only valid when |kind()| is Scalar or Reference.
 
-  ScalarTypeDescr::Type scalarType() const;
-  ReferenceTypeDescr::Type referenceType() const;
-  SimdType simdType() const;
+  Scalar::Type scalarType() const;
+  ReferenceType referenceType() const;
 
   ///////////////////////////////////////////////////////////////////////////
   // Queries valid only for arrays.
@@ -177,8 +177,8 @@ class TypedObjectPrediction {
   // the offset (in bytes), type, and index of the field
   // respectively.  Otherwise returns false.
   bool hasFieldNamed(jsid id, size_t* fieldOffset,
-                     TypedObjectPrediction* fieldType,
-                     size_t* fieldIndex) const;
+                     TypedObjectPrediction* fieldType, size_t* fieldIndex,
+                     bool* fieldMutable) const;
 };
 
 }  // namespace jit

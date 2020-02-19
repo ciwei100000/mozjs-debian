@@ -1,5 +1,5 @@
-/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
- * vim: set ts=8 sts=4 et sw=4 tw=99:
+/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 2 -*-
+ * vim: set ts=8 sts=2 et sw=2 tw=80:
  * This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -51,6 +51,13 @@ void MacroAssembler::move16To64SignExtend(Register src, Register64 dest) {
 
 void MacroAssembler::move32To64SignExtend(Register src, Register64 dest) {
   movslq(src, dest.reg);
+}
+
+// ===============================================================
+// Load instructions
+
+void MacroAssembler::load32SignExtendToPtr(const Address& src, Register dest) {
+  movslq(Operand(src), dest);
 }
 
 void MacroAssembler::andPtr(Register src, Register dest) { andq(src, dest); }
@@ -257,6 +264,8 @@ void MacroAssembler::inc64(AbsoluteAddress dest) {
 
 void MacroAssembler::neg64(Register64 reg) { negq(reg.reg); }
 
+void MacroAssembler::negPtr(Register reg) { negq(reg); }
+
 // ===============================================================
 // Shift functions
 
@@ -402,7 +411,9 @@ void MacroAssembler::popcnt64(Register64 src64, Register64 dest64,
     return;
   }
 
-  if (src != dest) movq(src, dest);
+  if (src != dest) {
+    movq(src, dest);
+  }
 
   MOZ_ASSERT(tmp != dest);
 
@@ -480,7 +491,9 @@ void MacroAssembler::branch64(Condition cond, Register64 lhs, Imm64 val,
              "other condition codes not supported");
 
   branchPtr(cond, lhs.reg, ImmWord(val.value), success);
-  if (fail) jump(fail);
+  if (fail) {
+    jump(fail);
+  }
 }
 
 void MacroAssembler::branch64(Condition cond, Register64 lhs, Register64 rhs,
@@ -495,7 +508,9 @@ void MacroAssembler::branch64(Condition cond, Register64 lhs, Register64 rhs,
              "other condition codes not supported");
 
   branchPtr(cond, lhs.reg, rhs.reg, success);
-  if (fail) jump(fail);
+  if (fail) {
+    jump(fail);
+  }
 }
 
 void MacroAssembler::branch64(Condition cond, const Address& lhs, Imm64 val,
@@ -551,11 +566,17 @@ void MacroAssembler::branchPtr(Condition cond, wasm::SymbolicAddress lhs,
 
 void MacroAssembler::branchPrivatePtr(Condition cond, const Address& lhs,
                                       Register rhs, Label* label) {
+#if defined(JS_UNALIGNED_PRIVATE_VALUES)
+  branchPtr(cond, lhs, rhs, label);
+#else
   ScratchRegisterScope scratch(*this);
-  if (rhs != scratch) movePtr(rhs, scratch);
+  if (rhs != scratch) {
+    movePtr(rhs, scratch);
+  }
   // Instead of unboxing lhs, box rhs and do direct comparison with lhs.
   rshiftPtr(Imm32(1), scratch);
   branchPtr(cond, lhs, scratch, label);
+#endif
 }
 
 void MacroAssembler::branchTruncateFloat32ToPtr(FloatRegister src,
@@ -676,13 +697,16 @@ void MacroAssembler::spectreBoundsCheck32(Register index, Register length,
   MOZ_ASSERT(index != scratch);
   MOZ_ASSERT(length != scratch);
 
-  if (JitOptions.spectreIndexMasking) move32(Imm32(0), scratch);
+  if (JitOptions.spectreIndexMasking) {
+    move32(Imm32(0), scratch);
+  }
 
   cmp32(index, length);
   j(Assembler::AboveOrEqual, failure);
 
-  if (JitOptions.spectreIndexMasking)
+  if (JitOptions.spectreIndexMasking) {
     cmovCCl(Assembler::AboveOrEqual, scratch, index);
+  }
 }
 
 void MacroAssembler::spectreBoundsCheck32(Register index, const Address& length,
@@ -696,13 +720,16 @@ void MacroAssembler::spectreBoundsCheck32(Register index, const Address& length,
   MOZ_ASSERT(index != scratch);
   MOZ_ASSERT(length.base != scratch);
 
-  if (JitOptions.spectreIndexMasking) move32(Imm32(0), scratch);
+  if (JitOptions.spectreIndexMasking) {
+    move32(Imm32(0), scratch);
+  }
 
   cmp32(index, Operand(length));
   j(Assembler::AboveOrEqual, failure);
 
-  if (JitOptions.spectreIndexMasking)
+  if (JitOptions.spectreIndexMasking) {
     cmovCCl(Assembler::AboveOrEqual, scratch, index);
+  }
 }
 
 // ========================================================================
@@ -717,8 +744,8 @@ void MacroAssembler::truncateFloat32ToUInt64(Address src, Address dest,
 
   truncateFloat32ToInt64(src, dest, temp);
 
-  // For unsigned conversion the case of [INT64, UINT64] needs to get handle
-  // seperately.
+  // For unsigned conversion the case of [INT64, UINT64] needs to get handled
+  // separately.
   loadPtr(dest, temp);
   branchPtr(Assembler::Condition::NotSigned, temp, Imm32(0), &done);
 

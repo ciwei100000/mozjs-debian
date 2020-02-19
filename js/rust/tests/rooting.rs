@@ -22,15 +22,15 @@ fn rooting() {
 
         let cx = runtime.cx();
         let h_option = JS::OnNewGlobalHookOption::FireOnNewGlobalHook;
-        let c_option = JS::CompartmentOptions::default();
+        let c_option = JS::RealmOptions::default();
 
         rooted!(in(cx) let global = JS_NewGlobalObject(cx,
                                                        &SIMPLE_GLOBAL_CLASS,
                                                        ptr::null_mut(),
                                                        h_option,
                                                        &c_option));
-        let _ac = js::ac::AutoCompartment::with_obj(cx, global.get());
-        rooted!(in(cx) let prototype_proto = JS_GetObjectPrototype(cx, global.handle()));
+        let _ar = js::ar::AutoRealm::with_obj(cx, global.get());
+        rooted!(in(cx) let prototype_proto = JS::GetRealmObjectPrototype(cx));
         rooted!(in(cx) let proto = JS_NewObjectWithUniqueType(cx,
                                                               &CLASS as *const _,
                                                               prototype_proto.handle()));
@@ -45,28 +45,36 @@ unsafe extern "C" fn generic_method(_: *mut JSContext, _: u32, _: *mut JS::Value
 lazy_static! {
     static ref METHODS: [JSFunctionSpec; 4] = [
         JSFunctionSpec {
-            name: b"addEventListener\0" as *const u8 as *const libc::c_char,
+            name: JSFunctionSpec_Name {
+                string_: b"addEventListener\0" as *const u8 as *const libc::c_char,
+            },
             call: JSNativeWrapper { op: Some(generic_method), info: ptr::null() },
             nargs: 2,
             flags: JSPROP_ENUMERATE as u16,
             selfHostedName: 0 as *const libc::c_char
         },
         JSFunctionSpec {
-            name: b"removeEventListener\0" as *const u8 as *const libc::c_char,
+            name: JSFunctionSpec_Name {
+                string_: b"removeEventListener\0" as *const u8 as *const libc::c_char,
+            },
             call: JSNativeWrapper { op: Some(generic_method), info: ptr::null() },
             nargs: 2,
             flags: JSPROP_ENUMERATE as u16,
             selfHostedName: 0 as *const libc::c_char
         },
         JSFunctionSpec {
-            name: b"dispatchEvent\0" as *const u8 as *const libc::c_char,
+            name: JSFunctionSpec_Name {
+                string_: b"dispatchEvent\0" as *const u8 as *const libc::c_char,
+            },
             call: JSNativeWrapper { op: Some(generic_method), info: ptr::null() },
             nargs: 1,
             flags: JSPROP_ENUMERATE as u16,
             selfHostedName: 0 as *const libc::c_char
         },
         JSFunctionSpec {
-            name: ptr::null(),
+            name: JSFunctionSpec_Name {
+                string_: ptr::null(),
+            },
             call: JSNativeWrapper { op: None, info: ptr::null() },
             nargs: 0,
             flags: 0,

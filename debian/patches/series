@@ -15,3 +15,4 @@ time-zone-path-test-Update-for-what-our-system-ICU-return.patch
 tests-Adapt-formatted-strings-results-to-system-ICU.patch
 Skip-time-zone-tests-that-fails-with-system-ICU.patch
 Bug-1545437-Add-options-to-specify-Rust-target-name.patch
+riscv64.patch

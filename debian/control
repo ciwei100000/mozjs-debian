@@ -28,8 +28,10 @@ Build-Depends: debhelper-compat (= 12),
                zip
 Rules-Requires-Root: no
 Standards-Version: 4.5.0
-Vcs-Browser: https://salsa.debian.org/gnome-team/mozjs68
-Vcs-Git: https://salsa.debian.org/gnome-team/mozjs68.git
+XS-Debian-Vcs-Browser: https://salsa.debian.org/gnome-team/mozjs68
+XS-Debian-Vcs-Git: https://salsa.debian.org/gnome-team/mozjs68.git
+Vcs-Git: https://salsa.debian.org/gnome-team/mozjs68.git -b ubuntu/focal
+Vcs-Browser: https://salsa.debian.org/gnome-team/mozjs68/tree/ubuntu/focal
 Homepage: https://developer.mozilla.org/en-US/docs/Mozilla/Projects/SpiderMonkey
 
 Package: libmozjs-68-0

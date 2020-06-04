@@ -2,7 +2,6 @@
 # -*- makefile -*-
 
 include /usr/share/dpkg/default.mk
-include /usr/share/rustc/architecture.mk
 
 # Uncomment this to turn on verbose mode.
 #export DH_VERBOSE=1
@@ -23,12 +22,13 @@ SRCDIR = $(CURDIR)/js/src
 BUILDDIR = $(CURDIR)/debian/build
 CONFIGURE_FLAGS =
 
-DEB_UPSTREAM_VERSION = $(shell dpkg-parsechangelog | sed -rne 's/^Version: ([0-9.]+)[-+].*$$/\1/p')
-DEB_UPSTREAM_MAJOR = $(shell echo $(DEB_UPSTREAM_VERSION) | cut -d. -f1)
-DEB_UPSTREAM_MINOR = $(shell echo $(DEB_UPSTREAM_VERSION) | cut -d. -f2)
-DEB_UPSTREAM_PATCH = $(shell echo $(DEB_UPSTREAM_VERSION) | cut -d. -f3)
+UPSTREAM_VERSION = $(shell echo $(DEB_VERSION_UPSTREAM) | sed -e 's/[-+~].*//')
+UPSTREAM_MAJOR = $(shell echo $(UPSTREAM_VERSION) | cut -d. -f1)
+UPSTREAM_MINOR = $(shell echo $(UPSTREAM_VERSION) | cut -d. -f2)
+UPSTREAM_PATCH = $(shell echo $(UPSTREAM_VERSION) | cut -d. -f3)
 
-LIBNAME = libmozjs-$(DEB_UPSTREAM_MAJOR)
+LIBNAME = libmozjs-$(UPSTREAM_MAJOR)
+SONAME = $(LIBNAME).so.0
 
 # ia64 currently has toolchain issues, so relax the link optimization
 ifneq (,$(findstring $(DEB_BUILD_ARCH),ia64))
@@ -42,12 +42,15 @@ ifneq (,$(findstring $(DEB_BUILD_ARCH),sh4))
 endif
 export DEB_CFLAGS_MAINT_APPEND DEB_CXXFLAGS_MAINT_APPEND
 
+EXCLUDED_TESTS :=
+
+# Upstream assumes everything uses SSE mathematics, but SSE isn't in
+# Debian's baseline for i386, so we are stuck with i387 and its weird
+# 80-bit floating point registers. We can't even work around this with
+# -fexcess-precision=standard, because mozjs is C++.
+# https://bugzilla.mozilla.org/show_bug.cgi?id=1621900
 ifneq (,$(findstring $(DEB_BUILD_ARCH),i386))
-	# A new test in mozjs68 fails on (at least) i386
-	# But the same behaviour was present in mozjs60 so this is not a
-	# regression: skip it.
-	# https://bugzilla.mozilla.org/show_bug.cgi?id=1621900
-	EXCLUDED_TESTS := basic/bug653153.js
+	EXCLUDED_TESTS += basic/bug653153.js
 endif
 
 ifneq (,$(findstring $(DEB_HOST_ARCH),mips mipsel mips64el))
@@ -63,9 +66,9 @@ CONFIGURE_FLAGS += --with-system-icu
 else
 CONFIGURE_FLAGS += --without-system-icu
 ifeq ($(DEB_HOST_ARCH_ENDIAN),little)
-ICU_DATA_FILE = icudt$(DEB_UPSTREAM_MAJOR)l.dat
+ICU_DATA_FILE = icudt$(UPSTREAM_MAJOR)l.dat
 else
-ICU_DATA_FILE = icudt$(DEB_UPSTREAM_MAJOR)b.dat
+ICU_DATA_FILE = icudt$(UPSTREAM_MAJOR)b.dat
 endif
 export ICU_DATA_FILE
 endif
@@ -79,8 +82,8 @@ override_dh_clean:
 	find $(CURDIR)/js/src/ -type l -exec rm {} \;
 	rm -f $(CURDIR)/js/src/config/nsinstall
 	rm -f $(CURDIR)/js/src/dist/bin/.purgecaches
-	rm -f  $(CURDIR)/js/src/js$(DEB_UPSTREAM_MAJOR)-config \
-		$(CURDIR)/js/src/mozjs-$(DEB_UPSTREAM_MAJOR).pc \
+	rm -f  $(CURDIR)/js/src/js$(UPSTREAM_MAJOR)-config \
+		$(CURDIR)/js/src/mozjs-$(UPSTREAM_MAJOR).pc \
 		$(CURDIR)/js/src/symverscript
 	rm -f $(CURDIR)/js/src/config.log
 	# rm -f $(CURDIR)/js/src/configure
@@ -112,8 +115,6 @@ endif
 	if env \
 		CC=$(CC) \
 		CXX=$(CXX) \
-		RUST_HOST=$(DEB_BUILD_RUST_TYPE) \
-		RUST_TARGET=$(DEB_HOST_RUST_TYPE) \
 	$(SHELL) $(SRCDIR)/configure \
 		--host=$(DEB_BUILD_GNU_TYPE) \
 		--target=$(DEB_HOST_GNU_TYPE) \
@@ -141,10 +142,10 @@ override_dh_install:
 	cd $(CURDIR)/debian/tmp/usr/lib/${DEB_HOST_MULTIARCH}/ && \
 		mv libjs_static.ajs $(LIBNAME).a && \
 		mv $(LIBNAME).so \
-		$(LIBNAME).so.$(DEB_UPSTREAM_MAJOR).$(DEB_UPSTREAM_MINOR).$(DEB_UPSTREAM_PATCH) && \
-		ln -s $(LIBNAME).so.$(DEB_UPSTREAM_MAJOR).$(DEB_UPSTREAM_MINOR).$(DEB_UPSTREAM_PATCH) \
-		$(LIBNAME).so.$(DEB_UPSTREAM_MAJOR) && \
-		ln -s $(LIBNAME).so.$(DEB_UPSTREAM_MAJOR) $(LIBNAME).so
+		$(LIBNAME).so.$(UPSTREAM_MAJOR).$(UPSTREAM_MINOR).$(UPSTREAM_PATCH) && \
+		ln -s $(LIBNAME).so.$(UPSTREAM_MAJOR).$(UPSTREAM_MINOR).$(UPSTREAM_PATCH) \
+		$(SONAME) && \
+		ln -s $(SONAME) $(LIBNAME).so
 	rm debian/tmp/usr/lib/${DEB_HOST_MULTIARCH}/$(LIBNAME).a
 	dh_install
 
@@ -153,7 +154,7 @@ override_dh_missing:
 
 override_dh_fixperms:
 	dh_fixperms
-	chmod a-x $(CURDIR)/debian/$(LIBNAME)-dev/usr/lib/${DEB_HOST_MULTIARCH}/pkgconfig/mozjs-$(DEB_UPSTREAM_MAJOR).pc
+	chmod a-x $(CURDIR)/debian/$(LIBNAME)-dev/usr/lib/${DEB_HOST_MULTIARCH}/pkgconfig/mozjs-$(UPSTREAM_MAJOR).pc
 
 override_dh_gnome:
 	dh_gnome --no-gnome-versions

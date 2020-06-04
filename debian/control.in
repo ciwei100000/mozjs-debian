@@ -5,21 +5,16 @@ Maintainer: Ubuntu Developers <ubuntu-devel-discuss@lists.ubuntu.com>
 XSBC-Original-Maintainer: Debian GNOME Maintainers <pkg-gnome-maintainers@lists.alioth.debian.org>
 Uploaders: @GNOME_TEAM@
 Build-Depends: debhelper-compat (= 12),
-               cargo (>= 0.40),
-               clang,
                gnome-pkg-tools,
                autoconf,
                autoconf2.13,
                automake,
-               libclang-dev,
                libicu-dev (>= 61.1),
                libreadline-dev,
-               llvm-dev,
                zlib1g-dev (>= 1:1.2.3),
                pkg-config,
                pkg-kde-tools,
                python2-dev,
-               rustc (>= 1.39),
                tzdata,
                zip
 Rules-Requires-Root: no

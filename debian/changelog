@@ -1,3 +1,52 @@
+mozjs68 (68.9.0-1) unstable; urgency=medium
+
+  [ Marco Trevisan (Treviño) ]
+  * New upstream release
+
+  [ Simon McVittie ]
+  * Remove rust and LLVM dependencies for better portability.
+    Thanks to John Paul Adrian Glaubitz (Closes: #959144)
+  * Refresh patch series with gbp-pq-style metadata
+  * Install as libmozjs-68.so.0, not libmozjs-68.so.68.
+    The SONAME is libmozjs-68.so.0, so we need to install the
+    libmozjs-68.so.0 symbolic link. In native installations, ldconfig
+    would create libmozjs-68.so.0 for us, but when using mozjs68 to
+    cross-compile other packages, that won't happen. (Closes: #959792)
+  * d/rules: Justify why we skip basic/bug653153.js on i386.
+    That test seems to be failing on i386 due to extended precision in the
+    i387 FPU. Upstream always builds with -mfpmath=sse and does not support
+    use of i387, but that isn't currently allowed in Debian due to our i386
+    baseline being 20 years old (in particular no SSE and no SSE2).
+  * d/rules: Avoid parsing d/changelog
+  * d/rules: Make variable names less confusing.
+    Avoid the DEB_ prefix in our own variables, to avoid mixing up
+    our DEB_UPSTREAM_VERSION with dpkg's DEB_VERSION_UPSTREAM.
+
+  [ Marco Trevisan (Treviño) ]
+  * debian/rules: Properly parse DEB_VERSION_UPSTREAM using shell
+  * d/p/Bug-1545437-Add-options-to-specify-Rust-target-name.patch:
+    - Dropped, included upstream
+
+ -- Marco Trevisan (Treviño) <marco@ubuntu.com>  Wed, 03 Jun 2020 22:16:07 +0200
+
+mozjs68 (68.7.0-1) unstable; urgency=medium
+
+  [ Marco Trevisan (Treviño) ]
+  * New upstream release
+
+  [ William Grant ]
+  * Add riscv64 support (Closes: #932893)
+
+ -- Jeremy Bicha <jbicha@debian.org>  Tue, 28 Apr 2020 21:12:05 -0400
+
+mozjs68 (68.6.0-2) unstable; urgency=medium
+
+  * control: Use clang and LLVM 10. The default clang is not installable
+    currently due to bug #954826 - work around this by explicitly picking a
+    different version.
+
+ -- Iain Lane <laney@debian.org>  Fri, 27 Mar 2020 11:04:21 +0000
+
 mozjs68 (68.6.0-1ubuntu1) focal; urgency=medium
 
   * Add riscv64 support.

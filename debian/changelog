@@ -1,10 +1,10 @@
-mozjs68 (68.9.0-1~ubuntu20.04.1) UNRELEASED; urgency=medium
+mozjs68 (68.9.0-1~ubuntu20.04.1) focal; urgency=medium
 
   * Merge with debian and backport to focal
     - Includes upstream security and memory fixes
     - Fixes missing libmozjs-68.so.0 link (LP: #1881013)
 
- -- Marco Trevisan (Treviño) <marco@ubuntu.com>  Thu, 04 Jun 2020 19:08:35 +0200
+ -- Marco Trevisan (Treviño) <marco@ubuntu.com>  Thu, 04 Jun 2020 19:13:50 +0200
 
 mozjs68 (68.9.0-1) unstable; urgency=medium
 

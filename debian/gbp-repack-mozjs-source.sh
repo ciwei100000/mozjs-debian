@@ -64,6 +64,8 @@ for ((i = 0; i < ${#FILTERED_FILES[@]}; i++)); do
         -exec rm -rfv "{}" \; || true
 done
 
+find "$mozjspath" -type d -empty -delete
+
 tmpout=$(mktemp /tmp/mozjs-debimport-XXXXXXXXX.diff)
 echo "Differencies found with orig saved at $tmpout, consider adjusting filters"
 diff -rq "$srcpath" "$mozjspath" > "$tmpout" || true

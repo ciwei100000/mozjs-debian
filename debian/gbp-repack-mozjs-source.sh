@@ -19,33 +19,47 @@ export AUTOCONF=/bin/true
 export TAR=/bin/true
 
 EXTRA_FILES=(
-    Cargo.toml
     intl/icu
     intl/icu-patches
     intl/icu_sources_data.py
 )
 
-srcpath=$(find "$GBP_TMP_DIR/" -mindepth 1 -maxdepth 1 -type d)
+FILTERED_FILES=(
+  '*.chm'
+  '*.exe'
+  '*.pyd'
+  '*.a'
+  '*.so'
+  '*.o'
+)
+
+if [ -z "$GBP_SOURCES_DIR" ]; then
+    echo "\$GBP_SOURCES_DIR is not defined, need a newer gbp version"
+    exit 1
+fi
+
+srcpath="$GBP_SOURCES_DIR"
 "$srcpath"/js/src/make-source-package.sh
 
 mozjspath="$(find "$STAGING" -mindepth 1 -maxdepth 1 -type d -name "$MOZJS_NAME"'-*')"
-
-# Remove added files, could be kept if gbp would recreate the orig after us
 set +x
-shopt -s globstar
-for f in "$mozjspath"/**; do
-    f="${f#"$mozjspath/"}"
-    if [ ! -e "$srcpath/$f" ]; then
-        rm "$mozjspath/$f" && echo "Removing generated $mozjspath/$f"
-    fi
-done
 
 for ((i = 0; i < ${#EXTRA_FILES[@]}; i++)); do
-    $RSYNC -a -q "$srcpath/${EXTRA_FILES[$i]}" "$mozjspath/$(dirname "${EXTRA_FILES[$i]}")/"
+    $RSYNC -a -q "$srcpath/${EXTRA_FILES[$i]}" \
+        "$mozjspath/$(dirname "${EXTRA_FILES[$i]}")/"
+done
+
+for ((i = 0; i < ${#FILTERED_FILES[@]}; i++)); do
+    find_args=()
+    [[ "${FILTERED_FILES[$i]}" == .* ]] && find_args=(-mindepth 1 -maxdepth 1)
+    find "$mozjspath/$(dirname "${FILTERED_FILES[$i]}")" \
+        "${find_args[@]}" \
+        -name "$(basename "${FILTERED_FILES[$i]}")" \
+        -exec rm -rfv "{}" \; || true
 done
 
 tmpout=$(mktemp /tmp/mozjs-debimport-XXXXXXXXX.diff)
-echo "Differencies found with orig saved at $tmpout, consider filtering them"
+echo "Differencies found with orig saved at $tmpout, consider adjusting filters"
 diff -rq "$srcpath" "$mozjspath" > "$tmpout" || true
 
 rm -rf "$srcpath"

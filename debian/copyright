@@ -1,6 +1,6 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: SpiderMonkey
-Source: http://ftp.mozilla.org/pub/mozilla.org/js/
+Source: https://ftp.mozilla.org/pub/firefox/releases/
 Files-Excluded:
  build/pgo
  js/src/octane

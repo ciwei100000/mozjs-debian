@@ -5,6 +5,7 @@ Files-Excluded:
  build/pgo
  js/src/octane
  third_party/python/mock-1.0.0/html/_static
+ third_party/python/coverage/coverage/htmlfiles/*.min.js
 Comment: This file is derived from Firefox's debian/copyright
 
 Files: *

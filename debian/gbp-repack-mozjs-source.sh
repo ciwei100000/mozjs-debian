@@ -38,6 +38,12 @@ if [ -z "$GBP_SOURCES_DIR" ]; then
     exit 1
 fi
 
+debpath="$(dirname "$0")"
+
+for i in $(grep-dctrl -s Files-Excluded -n - 2> /dev/null < "$debpath/copyright"); do
+    FILTERED_FILES+=("./$i")
+done
+
 srcpath="$GBP_SOURCES_DIR"
 "$srcpath"/js/src/make-source-package.sh
 

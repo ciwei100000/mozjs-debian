@@ -3,6 +3,13 @@
 
 include /usr/share/dpkg/default.mk
 
+# Disable CET, until JIT is ported too, preventing accidentally
+# building incompatible binaries.
+ifeq ($(DEB_HOST_ARCH),amd64)
+export DEB_CFLAGS_MAINT_APPEND=-fcf-protection=none
+export DEB_CXXFLAGS_MAINT_APPEND=-fcf-protection=none
+endif
+
 # Uncomment this to turn on verbose mode.
 #export DH_VERBOSE=1
 

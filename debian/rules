@@ -84,7 +84,9 @@ endif
 # riscv64 doesn't seem to handle LTO properly, causing dwz to fail
 # see https://github.com/rust-lang/rust/issues/66118#issuecomment-551446657
 # In such case, using thin LTO, fixes the problem
-ifneq (,$(findstring $(DEB_BUILD_ARCH),riscv64))
+
+# It seems to be neended even on amd64 and i386 for rustc (=1.41)
+ifneq (,$(findstring $(DEB_BUILD_ARCH),riscv64,amd64,i386))
 RUSTFLAGS += -Clto=thin
 endif
 
